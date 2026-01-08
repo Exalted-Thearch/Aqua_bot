@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "main": "src/index.js",
   "scripts": {
+    "start": "nodemon src/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -11,9 +12,16 @@
   "license": "ISC",
   "description": "A test bot",
   "dependencies": {
-    "discord.js": "^14.17.3",
+    "@google/generative-ai": "^0.24.1",
+    "axios": "^1.13.2",
+    "canvas": "^3.2.0",
+    "discord.js": "^14.21.0",
     "dotenv": "^16.4.7",
+    "emoji-regex": "^10.4.0",
     "eslint": "^9.19.0",
-    "start": "nodemon -e js,env src/index.js"
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7",
+    "start": "nodemon -e js,env src/index.js",
+    "string-similarity": "^4.0.4"
   }
 }

@@ -40,5 +40,6 @@
       "username": "root",
       "askForPassword": true
     }
-  ]
+  ],
+  "maven.view": "hierarchical"
 }
