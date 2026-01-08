@@ -8,9 +8,9 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
-  "author": "Eve",
+  "author": "Exalted Moon",
   "license": "ISC",
-  "description": "A test bot",
+  "description": "Aqua Bot",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "axios": "^1.13.2",

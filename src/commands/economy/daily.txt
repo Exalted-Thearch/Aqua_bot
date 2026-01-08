@@ -1,0 +1,81 @@
+// const { SlashCommandBuilder } = require("discord.js");
+// const { getUserProfile, updateUserProfile } = require("../../db"); // Adjust the path if necessary
+
+// module.exports = {
+//   data: new SlashCommandBuilder()
+//     .setName("daily")
+//     .setDescription("Claim your daily Bronze Coins and maintain your streak!"),
+//   async execute(interaction) {
+//     console.log(`[DAILY] Command received for user: ${interaction.user.id}`);
+//     const userId = interaction.user.id;
+
+//     try {
+//       console.log("[DAILY] Step 1: Getting user profile...");
+//       const profile = await getUserProfile(userId);
+//       console.log("[DAILY] Step 1: Profile received successfully.");
+
+//       const now = Date.now();
+//       const lastClaimed = profile.daily.lastClaimed;
+
+//       const cooldown = 22 * 60 * 60 * 1000;
+
+//       if (now - lastClaimed < cooldown) {
+//         console.log("[DAILY] User is on cooldown. Replying...");
+//         const timeLeft = cooldown - (now - lastClaimed);
+//         const hours = Math.floor(timeLeft / (1000 * 60 * 60));
+//         const minutes = Math.floor((timeLeft % (1000 * 60 * 60)) / (1000 * 60));
+//         return interaction.reply({
+//           content: `You've already claimed your daily reward. Please wait **${hours}h ${minutes}m** to claim again.`,
+//           ephemeral: true,
+//         });
+//       }
+
+//       console.log("[DAILY] Step 2: Calculating streak and reward...");
+//       let newStreak = profile.daily.streak;
+//       let reward;
+//       let message;
+
+//       const streakBreaker = 48 * 60 * 60 * 1000;
+
+//       if (now - lastClaimed > streakBreaker) {
+//         newStreak = 1;
+//         reward = 100;
+//         message = `You claimed your daily **100** Bronze Coins! Your previous streak was lost, but a new one of **1 day** has begun.`;
+//         console.log("[DAILY] Streak broken. New streak: 1");
+//       } else {
+//         newStreak++;
+//         reward = 100 + newStreak * 10;
+//         message = `You claimed your daily **${reward}** Bronze Coins! Your streak is now **${newStreak} days**.`;
+//         console.log(`[DAILY] Streak continued. New streak: ${newStreak}`);
+//       }
+
+//       const updates = {
+//         bronze: profile.bronze + reward,
+//         daily: {
+//           streak: newStreak,
+//           lastClaimed: now,
+//         },
+//       };
+
+//       console.log("[DAILY] Step 3: Updating user profile in database...");
+//       await updateUserProfile(userId, updates);
+//       console.log("[DAILY] Step 3: Profile updated successfully.");
+
+//       console.log("[DAILY] Step 4: Sending final reply...");
+//       await interaction.reply({
+//         content: message,
+//       });
+//       console.log("[DAILY] Step 4: Final reply sent.");
+//     } catch (error) {
+//       console.error("Error in /daily command:", error);
+//       // Check if we can still reply to the interaction
+//       if (!interaction.replied && !interaction.deferred) {
+//         await interaction.reply({
+//           content:
+//             "Something went wrong while claiming your daily reward. Please try again later.",
+//           ephemeral: true,
+//         });
+//       }
+//     }
+//   },
+// };

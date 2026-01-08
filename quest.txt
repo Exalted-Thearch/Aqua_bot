@@ -1,0 +1,2464 @@
+// Define a prefix for your commands
+const prefix = "!"; // You can change this to whatever you prefer
+
+const quests = [
+  {
+    type: "send_images",
+    description: "Send 5 images",
+    target: 5,
+    points: 50,
+  },
+  {
+    type: "send_emojis",
+    description: "Send 10 emojis",
+    target: 10,
+    points: 30,
+  },
+  {
+    type: "send_stickers",
+    description: "Send 3 stickers",
+    target: 3,
+    points: 40,
+  },
+  {
+    type: "send_messages",
+    description: "Send 30 messages",
+    target: 30,
+    points: 30,
+  },
+  {
+    type: "send_invites",
+    description: "invite 1 person",
+    target: 1,
+    points: 30,
+  },
+];
+
+const dailyQuestBonusPoints = 100; // Bonus for completing all three daily quests
+
+/*
+ * Assigns 3 random quests to a user if they don't have active, uncompleted quests
+ * or if their quests are from a previous day.
+ * @param {string} userId The ID of the user.
+ * @returns {Promise<Array>} A promise that resolves with the assigned quests.
+ */
+// index.js (or wherever assignDailyQuests is defined)
+
+async function assignDailyQuests(userId) {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+  return new Promise((resolve, reject) => {
+    db.all(
+      `SELECT * FROM user_quests WHERE user_id = ? AND assigned_date = ? AND completed = 0`,
+      [userId, today],
+      async (err, activeQuests) => {
+        if (err) return reject(err);
+
+        // If user already has 3 active (uncompleted) quests for today, just return them
+        if (activeQuests.length === 3) {
+          return resolve(activeQuests);
+        }
+
+        // If we reach here, it means the user needs new quests or new quests have been assigned but some were completed.
+        // We need to clear ALL quests for this user for TODAY that are either:
+        // 1. Not yet completed (but we are re-assigning, implying they want new ones)
+        // 2. Completed AND Claimed (they should be cleared to make space for new ones)
+        // We should NOT delete completed but unclaimed quests, as they still need to be claimed.
+
+        // Strategy: Delete all of today's quests that are either not completed OR are completed AND claimed.
+        // This ensures only "completed but unclaimed" quests remain if they exist for today.
+        db.run(
+          `DELETE FROM user_quests WHERE user_id = ? AND assigned_date = ? AND (completed = 0 OR claimed = 1)`,
+          [userId, today],
+          async (err) => {
+            if (err) {
+              console.error(
+                "Error clearing old quests for today:",
+                err.message
+              );
+              return reject(err);
+            }
+
+            // Also delete any quests from previous days, completed or not.
+            db.run(
+              `DELETE FROM user_quests WHERE user_id = ? AND assigned_date != ?`,
+              [userId, today],
+              async (err) => {
+                if (err) {
+                  console.error(
+                    "Error clearing quests from previous days:",
+                    err.message
+                  );
+                  return reject(err);
+                }
+
+                // Now, fetch any remaining quests for today that are completed but NOT claimed.
+                db.all(
+                  `SELECT * FROM user_quests WHERE user_id = ? AND assigned_date = ? AND completed = 1 AND claimed = 0`,
+                  [userId, today],
+                  async (err, existingCompletedUnclaimedQuests) => {
+                    if (err) return reject(err);
+
+                    // We need to assign enough new quests to bring the total up to 3,
+                    // considering any already existing completed but unclaimed quests.
+                    const questsToAssignCount =
+                      3 - existingCompletedUnclaimedQuests.length;
+
+                    if (questsToAssignCount <= 0) {
+                      // User already has 3 completed (unclaimed) quests, or more.
+                      // This scenario should be rare with the current logic, but a safeguard.
+                      return resolve(existingCompletedUnclaimedQuests);
+                    }
+
+                    // Filter out quest types that are already existing as completed/unclaimed for today
+                    const existingQuestTypes =
+                      existingCompletedUnclaimedQuests.map((q) => q.quest_type);
+                    const availableQuests = quests.filter(
+                      (q) => !existingQuestTypes.includes(q.type)
+                    );
+
+                    const shuffledQuests = [...availableQuests].sort(
+                      () => 0.5 - Math.random()
+                    );
+                    const assignedNew = shuffledQuests.slice(
+                      0,
+                      questsToAssignCount
+                    );
+
+                    const stmt = db.prepare(
+                      `INSERT INTO user_quests (user_id, quest_type, target_count, current_progress, assigned_date, completed, claimed) VALUES (?, ?, ?, ?, ?, 0, 0)`
+                    );
+                    for (const quest of assignedNew) {
+                      stmt.run(userId, quest.type, quest.target, 0, today);
+                    }
+                    stmt.finalize((err) => {
+                      if (err) return reject(err);
+
+                      // Fetch and return all quests for today (newly assigned + existing completed-unclaimed)
+                      db.all(
+                        `SELECT * FROM user_quests WHERE user_id = ? AND assigned_date = ?`,
+                        [userId, today],
+                        (err, allTodayQuests) => {
+                          if (err) return reject(err);
+                          resolve(allTodayQuests);
+                        }
+                      );
+                    });
+                  }
+                );
+              }
+            );
+          }
+        );
+      }
+    );
+  });
+}
+
+
+// Merged client.on("messageCreate") blocks
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return; // Ignore bot messages
+
+  const userId = message.author.id;
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Function to update quest progress
+  async function updateQuestProgress(questType, increment = 1) {
+    return new Promise((resolve, reject) => {
+      db.get(
+        `SELECT * FROM user_quests WHERE user_id = ? AND quest_type = ? AND assigned_date = ? AND completed = 0`,
+        [userId, questType, today],
+        (err, row) => {
+          if (err) return reject(err);
+          if (row) {
+            const newProgress = row.current_progress + increment;
+            const isCompleted = newProgress >= row.target_count ? 1 : 0;
+
+            db.run(
+              `UPDATE user_quests SET current_progress = ?, completed = ? WHERE user_id = ? AND quest_type = ? AND assigned_date = ?`,
+              [newProgress, isCompleted, userId, questType, today],
+              function (err) {
+                if (err) return reject(err);
+                if (isCompleted && !row.completed) {
+                  // If just completed
+                  message.channel.send(
+                    `🎉 Quest Completed! You finished "${
+                      quests.find((q) => q.type === questType).description
+                    }"! Use \`${prefix}claimquests\` to claim your rewards.`
+                  );
+                }
+                resolve();
+              }
+            );
+          } else {
+            resolve(); // No active quest of this type
+          }
+        }
+      );
+    });
+  }
+
+  // --- Quest Tracking Logic ---
+
+  // Track messages
+  await updateQuestProgress("send_messages");
+
+  // Track images (attachments that are images)
+  if (message.attachments.size > 0) {
+    const imageAttachments = message.attachments.filter(
+      (attachment) =>
+        attachment.contentType && attachment.contentType.startsWith("image/")
+    );
+    if (imageAttachments.size > 0) {
+      await updateQuestProgress("send_images", imageAttachments.size);
+    }
+  }
+
+  // Track emojis (custom and unicode)
+  const customEmojiRegex = /<a?:\w+:\d+>/g; // Matches custom Discord emoji
+  const customEmojis = message.content.match(customEmojiRegex) || [];
+  const emojiCountFromRegex = (message.content.match(emojiRegex()) || [])
+    .length;
+
+  const emojiCount = customEmojis.length + emojiCountFromRegex;
+
+  if (emojiCount > 0) {
+    await updateQuestProgress("send_emojis", emojiCount);
+  }
+
+  // Track stickers
+  if (message.stickers.size > 0) {
+    await updateQuestProgress("send_stickers", message.stickers.size);
+  }
+
+  // Track invite links (basic check, could be improved)
+  const inviteLinkRegex =
+    /(discord\.gg\/|discordapp\.com\/invite\/)([a-zA-Z0-9]+)/g;
+  const inviteLinks = message.content.match(inviteLinkRegex) || [];
+  if (inviteLinks.length > 0) {
+    await updateQuestProgress("send_invites", inviteLinks.length);
+  }
+
+  // --- Command Handling Logic ---
+  const args = message.content.slice(prefix.length).trim().split(/ +/);
+  const command = args.shift().toLowerCase();
+
+  // Command: !quests
+  if (command === "quests") {
+    try {
+      const userQuests = await assignDailyQuests(userId); // Ensure quests are assigned/fetched
+
+      if (userQuests.length === 0) {
+        return message.channel.send(
+          "You currently have no active quests. Try again later!"
+        );
+      }
+
+      let questMessage = `**Daily Quests for ${message.author.username}:**\n\n`;
+      let allCompletedAndClaimed = true; // Track if all are completed AND claimed
+
+      userQuests.forEach((q) => {
+        const questDef = quests.find((qd) => qd.type === q.quest_type);
+        if (questDef) {
+          const status = q.completed ? "✅ COMPLETED" : "⏳ IN PROGRESS";
+          const claimedStatus = q.claimed ? "(Claimed)" : "";
+          questMessage += `- **${questDef.description}**: ${q.current_progress}/${q.target_count} ${status} ${claimedStatus}\n`;
+          if (!q.completed || !q.claimed) {
+            // If not completed OR not claimed, then allCompletedAndClaimed is false
+            allCompletedAndClaimed = false;
+          }
+        }
+      });
+
+      // Check if all quests are completed AND not yet claimed
+      const totalUnclaimedCompletedQuests = userQuests.filter(
+        (q) => q.completed && !q.claimed
+      ).length;
+
+      if (totalUnclaimedCompletedQuests === 3) {
+        questMessage += `\n🌟 All quests completed! Use \`${prefix}claimquests\` to claim your rewards and bonus!`;
+      } else if (
+        totalUnclaimedCompletedQuests > 0 &&
+        totalUnclaimedCompletedQuests < 3
+      ) {
+        questMessage += `\nUse \`${prefix}claimquests\` to claim rewards for completed quests.`;
+      } else if (allCompletedAndClaimed) {
+        // Check the new variable
+        questMessage +=
+          "\nAll your daily quests are completed and claimed! Come back tomorrow for new quests.";
+      } else if (
+        totalUnclaimedCompletedQuests === 0 &&
+        userQuests.some((q) => !q.completed)
+      ) {
+        questMessage += "\nKeep working on your quests!";
+      }
+
+      message.channel.send(questMessage);
+    } catch (error) {
+      console.error("Error fetching quests:", error.message);
+      message.channel.send("An error occurred while fetching your quests.");
+    }
+  }
+
+  // Command: !claimquests
+  if (command === "claimquests") {
+    let totalPointsEarned = 0;
+    let bonusAwarded = false;
+
+    db.all(
+      `SELECT * FROM user_quests WHERE user_id = ? AND assigned_date = ? AND completed = 1 AND claimed = 0`,
+      [userId, today],
+      async (err, completedUnclaimedQuests) => {
+        if (err) {
+          console.error(err.message);
+          return message.channel.send(
+            "An error occurred while trying to claim rewards."
+          );
+        }
+
+        if (completedUnclaimedQuests.length === 0) {
+          return message.channel.send(
+            "You have no completed and unclaimed quests for today."
+          );
+        }
+
+        for (const q of completedUnclaimedQuests) {
+          const questDef = quests.find((qd) => qd.type === q.quest_type);
+          if (questDef) {
+            totalPointsEarned += questDef.points;
+            db.run(
+              `UPDATE user_quests SET claimed = 1 WHERE user_id = ? AND quest_type = ? AND assigned_date = ?`,
+              [userId, q.quest_type, today],
+              (updateErr) => {
+                if (updateErr) console.error(updateErr.message);
+              }
+            );
+          }
+        }
+
+        // Check for bonus
+        // Ensure all *assigned* quests are completed and unclaimed to get the bonus
+        const allAssignedQuests = await new Promise((resolve, reject) => {
+          db.all(
+            `SELECT * FROM user_quests WHERE user_id = ? AND assigned_date = ?`,
+            [userId, today],
+            (err, rows) => {
+              if (err) return reject(err);
+              resolve(rows);
+            }
+          );
+        });
+
+        const allAssignedCompletedAndUnclaimed =
+          allAssignedQuests.length === 3 &&
+          allAssignedQuests.every((q) => q.completed && !q.claimed);
+
+        if (allAssignedCompletedAndUnclaimed) {
+          totalPointsEarned += dailyQuestBonusPoints;
+          bonusAwarded = true;
+        }
+
+        // Add points to user's total
+        db.get(
+          `SELECT points FROM users WHERE id = ?`,
+          [userId],
+          (err, row) => {
+            if (err) {
+              console.error(err.message);
+              return message.channel.send(
+                "An error occurred while updating your total points."
+              );
+            }
+            const currentPoints = row ? row.points : 0;
+            const newTotalPoints = currentPoints + totalPointsEarned;
+
+            db.run(
+              `INSERT OR REPLACE INTO users (id, points) VALUES (?, ?)`,
+              [userId, newTotalPoints],
+              function (err) {
+                if (err) {
+                  console.error(err.message);
+                  return message.channel.send(
+                    "An error occurred while saving your new total points."
+                  );
+                }
+                let response = `🎉 You claimed your quest rewards and earned ${totalPointsEarned} points!`;
+                if (bonusAwarded) {
+                  response += ` (Including a ${dailyQuestBonusPoints} points bonus for completing all 3!)`;
+                }
+                response += `\nYour new total points: ${newTotalPoints}.`;
+                message.channel.send(response);
+              },
+              closeDatabase()
+            );
+          }
+        );
+      }
+    );
+  }
+// Function to close the database connection.
+function closeDatabase() {
+    // db.close() closes the database connection.
+    // It's important to close the connection when you're done with it to free up resources.
+    db.close((err) => {
+        if (err) {
+            console.error('Error closing database:', err.message);
+        } else {
+            console.log('Database connection closed.');
+        }
+    });
+}
+
+
+////
+
+require("dotenv").config();
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { initDb, getUserBalance, updateUserBalance } = require("./db"); // Corrected import
+const { coinFlip, nexus_coin } = require("./coinflip.js");
+const {
+  spinRoulette,
+  rouletteWheel,
+  payoutMultipliers,
+  getRouletteSpinResult,
+} = require("./roulettegame.js");
+const {
+  createDeck,
+  drawCard,
+  calculateHandValue,
+  getHandDisplay,
+  getCardDisplay,
+} = require("./blackjackgame.js");
+const {
+  Client,
+  ActivityType,
+  GatewayIntentBits,
+  Collection,
+  EmbedBuilder,
+  ButtonBuilder,
+  ActionRowBuilder,
+  ButtonStyle,
+} = require("discord.js");
+const sqlite3 = require("sqlite3").verbose();
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildPresences,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessages,
+  ],
+});
+
+client.commands = new Collection();
+const prefix = "!";
+const activeRouletteGames = {}; // Stores active roulette games by channel ID
+const activeBlackjackGames = {};
+const ROULETTE_BETTING_TIME_MS = 30 * 1000; // 30 seconds in milliseconds
+const ROULETTE_COOLDOWN_TIME_MS = 5 * 1000; // 5 seconds cooldown for placing bets
+const userCooldowns = new Map();
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+function getBlackjackEmbed(
+  game,
+  playerDiscordUser,
+  showDealerCards = false,
+  statusMessage = "",
+  gameIsOver = false
+) {
+  const playerHandValue = calculateHandValue(game.playerHand);
+  const dealerHandValue = calculateHandValue(game.dealerHand);
+
+  // Get card displays
+  const playerHandDisplay = getHandDisplay(game.playerHand);
+  let dealerHandDisplay;
+  let dealerDisplayValue;
+
+  if (showDealerCards) {
+    dealerHandDisplay = getHandDisplay(game.dealerHand);
+    dealerDisplayValue = dealerHandValue.value;
+  } else {
+    // Use your custom backside emoji for the hidden card
+    dealerHandDisplay = `${getCardDisplay(
+      game.dealerHand[0]
+    )} <:BackSide:1398023017396699226>`;
+    dealerDisplayValue = calculateHandValue([game.dealerHand[0]]).value;
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x00ff00) // Green for active game (you can choose colors for different states later)
+    .setAuthor({
+      name: playerDiscordUser.username,
+      iconURL: playerDiscordUser.displayAvatarURL(),
+    })
+    .setDescription(
+      (statusMessage ? `**${statusMessage}**\n\n` : "") + // Add statusMessage if it exists
+        "**Hit -** Take another card\n" +
+        "**Stand -** End your turn\n" +
+        // These should also be conditional based on game.playerHand.length !== 2 and gameIsOver
+        (game.playerHand.length === 2 && !gameIsOver
+          ? "**Double Down -** Double your bet, hit once, then stand\n"
+          : "") +
+        (game.playerHand.length === 2 &&
+        game.playerHand[0].rank === game.playerHand[1].rank &&
+        !gameIsOver
+          ? "**Split -** Split your cards into two hands\n"
+          : "")
+    )
+    .addFields(
+      // --- Row 1: Hands (Inline) ---
+      {
+        name: "Your Hand",
+        value: `${playerHandDisplay}\n\nValue: ${playerHandValue.value.toString()}`,
+        inline: true,
+      },
+      {
+        name: "Dealer Hand",
+        value: `${dealerHandDisplay}\n\nValue: ${dealerDisplayValue.toString()}`,
+        inline: true,
+      },
+
+      // --- Row 2: Game Info (Inline where suitable) ---
+      {
+        name: "Cards Remaining:",
+        value: game.deck.length.toString(),
+        inline: false,
+      }
+    )
+    .setTimestamp();
+
+  const row = new ActionRowBuilder();
+
+  row.addComponents(
+    new ButtonBuilder()
+      .setCustomId("blackjack_hit")
+      .setLabel("Hit")
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(gameIsOver || !game.playerTurn), // Disable if game is over or not player's turn
+
+    new ButtonBuilder()
+      .setCustomId("blackjack_stand")
+      .setLabel("Stand")
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(gameIsOver || !game.playerTurn), // Disable if game is over or not player's turn
+
+    new ButtonBuilder()
+      .setCustomId("blackjack_doubledown")
+      .setLabel("Double Down")
+      .setStyle(ButtonStyle.Secondary)
+      // Disable if game is over, not player's turn, or not initial deal (hand length != 2)
+      .setDisabled(
+        gameIsOver || !game.playerTurn || game.playerHand.length !== 2
+      )
+
+    // new ButtonBuilder()
+    //   .setCustomId("blackjack_split")
+    //   .setLabel("Split")
+    //   .setStyle(ButtonStyle.Secondary)
+    //   // Disable if game is over, not player's turn, not initial deal, or cards aren't same rank
+    //   .setDisabled(
+    //     gameIsOver ||
+    //       !game.playerTurn ||
+    //       game.playerHand.length !== 2 ||
+    //       game.playerHand[0].rank !== game.playerHand[1].rank
+    //   )
+  );
+
+  // Attach the row of buttons to the embed message.
+  // The message.send/edit call will pass this component.
+  embed.components = [row]; // This sets the components on the embed directly for later use in message.send/edit
+
+  return embed;
+}
+
+async function playDealersTurnAndDetermineWinner(
+  userId,
+  game,
+  playerDiscordUser,
+  gameMessage,
+  initialStatusMessage = ""
+) {
+  let dealerHandValue = calculateHandValue(game.dealerHand);
+  let statusMessage = initialStatusMessage;
+  let dealerActions = []; // To store dealer's hits descriptions
+
+  // 1. Reveal dealer's hidden card (this is one intentional update)
+  statusMessage += `Dealer reveals their hand.\n`;
+  let revealEmbed = getBlackjackEmbed(
+    game,
+    playerDiscordUser,
+    true,
+    statusMessage,
+    false
+  );
+  await gameMessage.edit({
+    embeds: [revealEmbed],
+    components: revealEmbed.components,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1000)); // Short pause after reveal
+
+  // 2. Dealer hits until 17 or more (Collect all actions without updating embed)
+  while (dealerHandValue.value < 17) {
+    const newCard = drawCard(game.deck);
+    game.dealerHand.push(newCard); // Add card to hand
+    dealerHandValue = calculateHandValue(game.dealerHand); // Recalculate hand value
+
+    // Only store the action string, DO NOT update embed here.
+    dealerActions.push(
+      `Dealer hits and draws ${getCardDisplay(newCard)}. Dealer's hand is now ${
+        dealerHandValue.value
+      }.`
+    ); // Keep detail for final display
+  }
+
+  // 3. Add all collected dealer actions to the status message (ONLY ONCE)
+  if (dealerActions.length > 0) {
+    statusMessage += "\n" + dealerActions.join("\n"); // Join all hit actions
+    statusMessage += `\nDealer's final hand is ${dealerHandValue.value}.\n`; // Concise final hand summary
+  } else {
+    statusMessage += "Dealer stands.\n"; // If dealer didn't hit at all
+  }
+
+  // 4. Determine final winner and outcome text
+  let finalWinner = null;
+  const finalPlayerHandValue = calculateHandValue(game.playerHand); // Recalculate player hand value for comparison
+
+  if (dealerHandValue.value > 21) {
+    statusMessage += "Dealer busted! You win!";
+    finalWinner = "player";
+  } else if (finalPlayerHandValue.value > dealerHandValue.value) {
+    statusMessage += "You win!";
+    finalWinner = "player";
+  } else if (dealerHandValue.value > finalPlayerHandValue.value) {
+    statusMessage += "Dealer wins!";
+    finalWinner = "dealer";
+  } else {
+    statusMessage += "It's a push!";
+    finalWinner = "push";
+  }
+
+  // 5. Final embed update (ONLY ONE UPDATE for all dealer's actions + final result)
+  const finalEmbed = getBlackjackEmbed(
+    game,
+    playerDiscordUser,
+    true,
+    statusMessage,
+    true
+  ); // Game is now over
+  await gameMessage.edit({
+    embeds: [finalEmbed],
+    components: finalEmbed.components,
+  });
+
+  // Handle payout and clear game state
+  await handleBlackjackPayout(userId, finalWinner, game.betAmount, gameMessage);
+  delete activeBlackjackGames[userId]; // Clear game state
+}
+async function revealRouletteResult(channelId) {
+  const game = activeRouletteGames[channelId];
+  if (!game) return;
+
+  const channel = client.channels.cache.get(channelId);
+  if (!channel) {
+    console.error(
+      `Could not find channel ${channelId} to reveal roulette result.`
+    );
+    delete activeRouletteGames[channelId];
+    return;
+  }
+  const allBets = game.bets;
+  const spinResult = getRouletteSpinResult(); // Call the new function
+  const winningNumber = spinResult.winningNumber;
+  const winningColor = spinResult.winningColor;
+  const winningSlot = spinResult.winningSlot;
+
+  let winnersList = [];
+  let losersList = [];
+  let totalWon = 0;
+  let totalLost = 0;
+
+  for (const bet of allBets) {
+    let userWonThisBet = false;
+    let winMultiplier = 0;
+
+    const normalizedBetType = bet.betType; // Use the normalized bet type from the stored bet
+    const numBet = parseInt(normalizedBetType);
+    if (
+      normalizedBetType === numBet.toString() &&
+      !isNaN(numBet) &&
+      numBet >= 0 &&
+      numBet <= 36
+    ) {
+      if (winningNumber === numBet) {
+        userWonThisBet = true;
+        winMultiplier = payoutMultipliers.number;
+      }
+    } else if (["red", "black"].includes(normalizedBetType)) {
+      if (winningNumber !== 0 && winningColor === normalizedBetType) {
+        userWonThisBet = true;
+        winMultiplier = payoutMultipliers[normalizedBetType];
+      }
+    } else if (["odd", "even"].includes(normalizedBetType)) {
+      if (
+        winningNumber !== 0 &&
+        winningSlot.isOdd === (normalizedBetType === "odd") &&
+        winningSlot.isEven === (normalizedBetType === "even")
+      ) {
+        userWonThisBet = true;
+        winMultiplier = payoutMultipliers[normalizedBetType];
+      }
+    } else if (["low", "high"].includes(normalizedBetType)) {
+      if (
+        winningNumber !== 0 &&
+        winningSlot.isLow === (normalizedBetType === "low") &&
+        winningSlot.isHigh === (normalizedBetType === "high")
+      ) {
+        userWonThisBet = true;
+        winMultiplier = payoutMultipliers[normalizedBetType];
+      }
+    } else if (["1st", "2nd", "3rd"].includes(normalizedBetType)) {
+      if (winningSlot.dozen === normalizedBetType) {
+        userWonThisBet = true;
+        winMultiplier = payoutMultipliers[normalizedBetType];
+      }
+    } else if (["col1", "col2", "col3"].includes(normalizedBetType)) {
+      if (winningSlot.column === normalizedBetType) {
+        userWonThisBet = true;
+        winMultiplier = payoutMultipliers[normalizedBetType];
+      }
+    }
+
+    if (userWonThisBet) {
+      const winnings = bet.betAmount * winMultiplier;
+      await updateUserBalance(bet.userId, winnings);
+      winnersList.push(
+        `<@${bet.userId}> won ${nexus_coin} **${winnings}** (bet ${bet.betAmount} on ${normalizedBetType})`
+      );
+      totalWon += winnings;
+    } else {
+      // User already had betAmount deducted at time of placing bet.
+      // No need to deduct again.
+      losersList.push(
+        `<@${bet.userId}> lost ${nexus_coin} **${bet.betAmount}** (bet ${bet.betAmount} on ${bet.betType})`
+      );
+      totalLost += bet.betAmount;
+    }
+  }
+  const resultEmbed = new EmbedBuilder()
+    .setColor(
+      winningColor === "red"
+        ? 0xff0000
+        : winningColor === "black"
+        ? 0x000000
+        : 0x00ff00
+    ) // Color based on winning number
+    .setTitle("<:rouletteWheel:1397521672243777566> Roulette Round Results!")
+    .setDescription(
+      `The ball landed on **${winningNumber}** (${winningColor})!`
+    )
+    .addFields(
+      {
+        name: "Winners 🎉",
+        value:
+          winnersList.length > 0
+            ? winnersList.join("\n")
+            : "No winners this round.",
+        inline: false,
+      },
+      {
+        name: "Losers 💔",
+        value:
+          losersList.length > 0
+            ? losersList.join("\n")
+            : "No losers this round.",
+        inline: false,
+      },
+      { name: "\u200b", value: "\u200b", inline: false }, // Spacer
+      {
+        name: "Total Won by Players",
+        value: `${nexus_coin} ${totalWon}`,
+        inline: true,
+      },
+      {
+        name: "Total Lost by Players",
+        value: `${nexus_coin} ${totalLost}`,
+        inline: true,
+      }
+    )
+    .setFooter({ text: `Round ended. Thank you for playing!` })
+    .setTimestamp();
+
+  await channel.send({ embeds: [resultEmbed] });
+
+  // Clear game state for this channel
+  delete activeRouletteGames[channelId];
+}
+async function handleBlackjackPayout(userId, winner, betAmount, gameMessage) {
+  let payoutAmount = 0;
+  let payoutMessage = "";
+
+  if (winner === "player") {
+    const game = activeBlackjackGames[userId]; // Get game to check for Blackjack payout
+    const playerHandValue = calculateHandValue(game.playerHand);
+
+    if (playerHandValue.isBlackjack) {
+      payoutAmount = betAmount * 2.5; // 3:2 payout (1.5 profit + 1 original = 2.5 total)
+      payoutMessage = `You won ${nexus_coin} **${payoutAmount}** with Blackjack!`;
+    } else {
+      payoutAmount = betAmount * 2; // 1:1 payout (1 profit + 1 original = 2 total)
+      payoutMessage = `You won ${nexus_coin} **${payoutAmount}** !`;
+    }
+    await updateUserBalance(userId, payoutAmount); // Add total payout
+  } else if (winner === "push") {
+    payoutAmount = betAmount; // Return original bet
+    payoutMessage = `It's a push! Your bet of ${nexus_coin} **${betAmount}** has been returned.`;
+    await updateUserBalance(userId, payoutAmount); // Return bet
+  } else {
+    // Dealer wins (player loses)
+    payoutMessage = `You lost your bet of ${nexus_coin} **${betAmount}**.`;
+    // Bet was already deducted when starting the game, so no further action needed here for loss
+  }
+
+  const newBalance = await getUserBalance(userId); // Get updated balance
+  // payoutMessage += ` Your new balance is ${nexus_coin} **${newBalance}**.`;
+
+  // Update the embed with the payout message
+  const currentEmbed = gameMessage.embeds[0];
+  const finalEmbed = EmbedBuilder.from(currentEmbed)
+    .setColor(
+      winner === "player" ? 0x00ff00 : winner === "dealer" ? 0xff0000 : 0xffff00
+    ) // Set final color
+    .setFields(
+      // Keep existing fields
+      ...currentEmbed.fields,
+      // Add a new field for the payout result and new balance
+      { name: "Final Result", value: payoutMessage, inline: false },
+      {
+        name: "Your New Balance",
+        value: `${nexus_coin} ${newBalance}`,
+        inline: false,
+      }
+    )
+    .setFooter({ text: `Blackjack! Game Over.` }) // Clear original footer or make it final
+    .setTimestamp();
+  await gameMessage.edit({
+    embeds: [finalEmbed],
+    components: [],
+  });
+}
+client.on("ready", async (c) => {
+  console.log(`✅ Logged in as ${c.user.tag}!`);
+  await initDb();
+  console.log("Database initialized and ready.");
+
+  const guild = client.guilds.cache.get(process.env.GUILD_ID);
+  setInterval(async () => {
+    try {
+      const fetchedMembers = await guild.members.fetch({
+        withPresences: true,
+        force: false, // Use cache unless needed
+      });
+
+      const totalOnline = fetchedMembers.filter(
+        (member) =>
+          member.presence?.status === "online" ||
+          member.presence?.status === "idle"
+      ).size;
+
+      const status = [
+        {
+          name: "EveOfChaos",
+          type: ActivityType.Streaming,
+          url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        },
+        {
+          name: `${totalOnline} active members`,
+          type: ActivityType.Watching,
+        },
+        {
+          name: "Spotify",
+          type: ActivityType.Listening,
+        },
+      ];
+
+      const randomStatus = status[Math.floor(Math.random() * status.length)];
+      client.user.setActivity(randomStatus);
+    } catch (error) {
+      console.error("Error updating status:", error);
+    }
+  }, 60000);
+});
+
+client.on("interactionCreate", async (interaction) => {
+  if (interaction.isChatInputCommand()) {
+    if (interaction.commandName === "ping") {
+      // Corrected: use interaction.reply for slash commands
+      await interaction.reply(
+        `Websocket latency: **${interaction.client.ws.ping}ms**.`
+      );
+    }
+    return; // Always return after handling a command
+  }
+  if (interaction.isButton()) {
+    const userId = interaction.user.id; // Get the ID of the user who clicked the button
+    const customId = interaction.customId; // Get the customId of the button (e.g., 'blackjack_hit')
+
+    // IMPORTANT: Acknowledge the interaction immediately
+    // This tells Discord "I got your click, I'm working on it."
+    // This prevents the "This interaction failed" message.
+    await interaction.deferUpdate(); // This makes the bot show "Bot is thinking..." and prevents the error.
+    // It allows you to edit the original message later using interaction.editReply()
+    // or just proceed with game.gameMessage.edit() as you are.
+
+    // Get the active game state for this user
+    const game = activeBlackjackGames[userId];
+
+    // Check if there's an active game and it's the player's turn
+    if (!game || !game.playerTurn) {
+      // Send a ephemeral (only visible to user) message if they click a button when not in game
+      return await interaction.followUp({
+        content:
+          "You are not in an active Blackjack game, or it's not your turn!",
+        ephemeral: true, // Only the user who clicked will see this
+      });
+    }
+
+    // Handle specific Blackjack button clicks
+    if (customId === "blackjack_hit") {
+      // Re-use logic from your !hit command handler
+      // (You might want to extract core hit logic into a separate function for reusability)
+
+      const newCard = drawCard(game.deck);
+      game.playerHand.push(newCard);
+      const playerHandValue = calculateHandValue(game.playerHand);
+
+      let statusMessage = "";
+      let gameOver = false;
+      let finalWinner = null;
+
+      if (playerHandValue.value > 21) {
+        statusMessage = "You busted! Your hand is over 21. You lose!";
+        finalWinner = "dealer";
+        gameOver = true;
+      }
+
+      // Update the embed via the original game message
+      const updatedEmbedHit = getBlackjackEmbed(
+        game,
+        interaction.user,
+        false,
+        statusMessage,
+        gameOver
+      );
+      await game.gameMessage.edit({
+        embeds: [updatedEmbedHit],
+        components: updatedEmbedHit.components,
+      });
+
+      if (gameOver) {
+        await handleBlackjackPayout(
+          userId,
+          finalWinner,
+          game.betAmount,
+          game.gameMessage
+        );
+        delete activeBlackjackGames[userId];
+      }
+    } else if (customId === "blackjack_stand") {
+      // Re-use logic from your !stand command handler
+
+      game.playerTurn = false;
+      game.playerStand = true;
+
+      let dealerHandValue = calculateHandValue(game.dealerHand);
+      let statusMessage = "You stood. Dealer's turn!\n";
+
+      let revealEmbed = getBlackjackEmbed(
+        game,
+        interaction.user,
+        true,
+        statusMessage + "Dealer reveals their hand..."
+      );
+      await game.gameMessage.edit({
+        embeds: [revealEmbed],
+        components: revealEmbed.components,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      while (dealerHandValue.value < 17) {
+        const newCard = drawCard(game.deck);
+        game.dealerHand.push(newCard);
+        dealerHandValue = calculateHandValue(game.dealerHand);
+
+        statusMessage += `Dealer hits and draws ${getCardDisplay(
+          newCard
+        )}. Dealer's hand is now ${dealerHandValue.value}.\n`;
+        let updatedEmbed = getBlackjackEmbed(
+          game,
+          interaction.user,
+          true,
+          statusMessage
+        );
+        await game.gameMessage.edit({
+          embeds: [updatedEmbed],
+          components: updatedEmbed.components,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+
+      let finalWinner = null;
+      const playerHandValue = calculateHandValue(game.playerHand); // Recalculate player hand value for comparison
+
+      if (dealerHandValue.value > 21) {
+        statusMessage += "Dealer busted! You win!";
+        finalWinner = "player";
+      } else if (playerHandValue.value > dealerHandValue.value) {
+        statusMessage += "You win! Your hand is higher than the dealer's.";
+        finalWinner = "player";
+      } else if (dealerHandValue.value > playerHandValue.value) {
+        statusMessage += "Dealer wins! Dealer's hand is higher than yours.";
+        finalWinner = "dealer";
+      } else {
+        statusMessage += "It's a push! Your bet is returned.";
+        finalWinner = "push";
+      }
+
+      const finalEmbedStand = getBlackjackEmbed(
+        game,
+        interaction.user,
+        true,
+        statusMessage,
+        true
+      );
+      await game.gameMessage.edit({
+        embeds: [finalEmbedStand],
+        components: finalEmbedStand.components,
+      });
+
+      await handleBlackjackPayout(
+        userId,
+        finalWinner,
+        game.betAmount,
+        game.gameMessage
+      );
+      delete activeBlackjackGames[userId];
+    } else if (customId === "blackjack_doubledown") {
+      // TODO: Implement Double Down logic
+      // - Deduct additional betAmount (double it)
+      // - Draw one card for player
+      // - Immediately stand (call stand logic)
+      // - Handle insufficient funds for doubledown
+      await interaction.followUp({
+        content: "Double Down is not yet implemented!",
+        ephemeral: true,
+      });
+    } else if (customId === "blackjack_split") {
+      // TODO: Implement Split logic
+      // - Handle insufficient funds
+      // - Create two new hands, manage game state for two hands
+      await interaction.followUp({
+        content: "Split is not yet implemented!",
+        ephemeral: true,
+      });
+    }
+  }
+});
+
+client.on("messageCreate", async (message) => {
+  // 1. Always ignore bot messages
+  if (message.author.bot) return;
+
+  // Common variables for commands (fetched once per message)
+  const userId = message.author.id;
+  const currentBalance = await getUserBalance(userId); // Ensure getUserBalance is imported
+
+  // --- Command Handling (prefixed commands) ---
+  if (message.content.startsWith(prefix)) {
+    const args = message.content.slice(prefix.length).trim().split(/ +/);
+    const commandName = args.shift().toLowerCase();
+
+    // Handle the coinflip command
+    if (commandName === "coinflip" || commandName === "cf") {
+      let betAmount;
+      if (args[0] && args[0].toLowerCase() === "all") {
+        betAmount = currentBalance;
+      } else {
+        betAmount = parseInt(args[0]);
+      }
+      let choice = args[1] ? args[1].toLowerCase() : "heads";
+      if (choice === "h") choice = "heads";
+      if (choice === "t") choice = "tails";
+
+      // Corrected: Validation logic
+      if (isNaN(betAmount) || betAmount <= 0) {
+        // Check if NOT a number OR zero/negative
+        return message.channel.send(
+          "**Usage:** `!coinflip <amount | all> <heads|tails>` - Amount must be a positive number."
+        );
+      }
+      const max_bet_limit = 300000;
+      if (betAmount > max_bet_limit) {
+        return message.channel.send(
+          `You cannot bet more than ${nexus_coin} **${max_bet_limit}**.`
+        );
+      }
+      // Corrected: Insufficient funds check should be after max bet limit
+      if (betAmount > currentBalance) {
+        return message.channel.send(
+          `You don't have enough currency! Your current balance is **${nexus_coin} ${currentBalance}**.` // Added nexus_coin for consistency
+        );
+      }
+      if (!["heads", "tails"].includes(choice)) {
+        return message.channel.send(
+          "**Usage:** `Please choose 'heads' or 'tails' (or 'h'|'t')."
+        );
+      }
+
+      const initialMessageContent = `${message.author.username} spent ${nexus_coin} **${betAmount}** and chose **${choice}**.`;
+      const spinningEmoji = "<a:nexus_coin_spin:1396801480618676395>"; // Custom animated emoji
+      const sentMessage = await message.channel.send(
+        `${initialMessageContent}\nThe coin spins... ${spinningEmoji}`
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      const result = await coinFlip(userId, betAmount, choice); // Ensure coinFlip is imported
+      await sentMessage.edit(
+        `${initialMessageContent}\n${result.finalMessage}`
+      );
+      return;
+    }
+
+    // Handle balance command
+    else if (commandName === "balance" || commandName === "bal") {
+      return message.channel.send(
+        `**${message.author.tag}**, you currently have ${nexus_coin} **${currentBalance}** !`
+      );
+    }
+
+    // Handle addmoney/removemoney commands
+    else if (
+      commandName === "addmoney" ||
+      commandName === "add" ||
+      commandName === "removemoney" ||
+      commandName === "rm"
+    ) {
+      // Owner check
+      if (message.author.id !== process.env.BOT_OWNER_ID) {
+        // Ensure process.env.OWNER_ID is correct
+        return message.channel.send(
+          "You do not have permission to use this command."
+        );
+      }
+      let targetUser = message.mentions.users.first(); // Corrected: 'users'
+      let targetUserId;
+      if (targetUser) {
+        targetUserId = targetUser.id;
+      } else if (args[0]) {
+        targetUserId = args[0];
+        try {
+          targetUser = await client.users.fetch(targetUserId);
+        } catch (e) {
+          targetUser = null; // Invalid ID
+        }
+      }
+      // Bot check for add/remove
+      if (targetUser && targetUser.bot) {
+        // Check targetUser is not null before .bot
+        return message.channel.send(
+          "You cannot add or remove money from a bot!"
+        );
+      }
+      // Validate target user found
+      if (!targetUserId || !targetUser) {
+        return message.channel.send(
+          "Please provide a user to modify (mention or ID)."
+        );
+      }
+
+      const amount = parseInt(args[1]);
+      if (isNaN(amount) || amount <= 0) {
+        return message.channel.send("Please provide a valid positive amount."); // Clarified "positive"
+      }
+
+      let multiplier;
+      let actionPastVerb;
+      let preposition;
+      if (commandName === "addmoney" || commandName === "add") {
+        multiplier = 1;
+        actionPastVerb = "added";
+        preposition = "to";
+      } else if (commandName === "removemoney" || commandName === "rm") {
+        multiplier = -1;
+        actionPastVerb = "removed";
+        preposition = "from";
+      } else {
+        return message.channel.send(
+          "An unexpected error occurred with the command type."
+        );
+      }
+
+      await updateUserBalance(targetUserId, amount * multiplier);
+      const newTargetBalance = await getUserBalance(targetUserId);
+
+      return message.channel.send(
+        `Successfully ${actionPastVerb} ${nexus_coin} **${amount}** ${preposition} <@${targetUserId}>\nTheir new balance is ${nexus_coin} **${newTargetBalance}**`
+      );
+    }
+
+    // Handle transfer command
+    else if (commandName === "transfer" || commandName === "send") {
+      const senderId = userId;
+      const senderBalance = currentBalance; // Already fetched
+
+      let receiverUser = message.mentions.users.first();
+      let receiverUserId;
+      if (receiverUser) {
+        receiverUserId = receiverUser.id;
+      } else if (args[0]) {
+        receiverUserId = args[0];
+        try {
+          receiverUser = await client.users.fetch(receiverUserId);
+        } catch (e) {
+          receiverUser = null; // Invalid ID
+        }
+      }
+
+      if (!receiverUserId || !receiverUser) {
+        return message.channel.send(
+          "Please provide a valid user to transfer to (mention or ID)."
+        );
+      }
+      if (receiverUser.bot) {
+        return message.channel.send("You cannot transfer money to a bot!");
+      }
+      if (receiverUserId === senderId) {
+        return message.channel.send(
+          "You can't transfer the money to yourself!"
+        );
+      }
+
+      const amount = parseInt(args[1]);
+      if (isNaN(amount) || amount <= 0) {
+        return message.channel.send("Please provide a valid positive amount.");
+      }
+      if (amount > senderBalance) {
+        return message.channel.send(
+          `You don't have enough money for this transfer! Your current balance is ${nexus_coin} ${senderBalance}.`
+        );
+      }
+
+      await updateUserBalance(senderId, -amount);
+      await updateUserBalance(receiverUserId, amount);
+
+      const senderNewBalance = await getUserBalance(senderId);
+      const receiverNewBalance = await getUserBalance(receiverUserId);
+
+      let confirmationMessage = `Successfully transferred ${nexus_coin} **${amount}** from **${message.author.tag}** to <@${receiverUserId}>.`;
+      confirmationMessage += `\nYour new balance is ${nexus_coin} **${senderNewBalance}**.`;
+      confirmationMessage += `\n<@${receiverUserId}>'s new balance is ${nexus_coin} **${receiverNewBalance}**.`;
+      return message.channel.send(confirmationMessage);
+    }
+
+    // Handle roulette command
+    else if (commandName === "roulette" || commandName === "roul") {
+      const betterId = userId;
+      const betterBalance = currentBalance; // Use currentBalance from top scope
+
+      if (args.length < 2) {
+        if (args.length === 1 && args[0].toLowerCase() === "help") {
+          const rouletteHelpEmbed = new EmbedBuilder() // Ensure EmbedBuilder is imported
+            .setColor(0x0099ff)
+            .setTitle(
+              "<:rouletteWheel:1397521672243777566> How to Play Roulette"
+            )
+            .setDescription(
+              "**Betting:** Choose a space where you think the ball will land. You can place multiple bets by running the command multiple times.\n" +
+                "Lower probability bets have higher payouts."
+            )
+            .addFields(
+              {
+                name: "Command Usage",
+                value: "`!roulette <amount> <bet_type>`",
+                inline: false,
+              },
+              {
+                name: "Bet Types & Multipliers",
+                value: "\u200b",
+                inline: false,
+              },
+              {
+                name: "Single Number",
+                value: "`x36` (e.g., `!roulette 100 7`)",
+                inline: true,
+              },
+              // Corrected: Dozens example to '1st'
+              {
+                name: "Dozens (1-12, 13-24, 25-36)",
+                value: "`x3` (e.g., `!roulette 100 1st`)",
+                inline: true,
+              },
+              {
+                name: "Columns (1st, 2nd, 3rd)",
+                value: "`x3` (e.g., `!roulette 100 col1`)",
+                inline: true,
+              },
+              {
+                name: "Halves (1-18, 19-36)",
+                value: "`x2` (e.g., `!roulette 100 low`)",
+                inline: true,
+              },
+              {
+                name: "Odd/Even",
+                value: "`x2` (e.g., `!roulette 100 even`)",
+                inline: true,
+              },
+              {
+                name: "Colors (Red, Black)",
+                value: "`x2` (e.g., `!roulette 100 red`)",
+                inline: true,
+              } // Corrected !roulette
+            )
+            .setFooter({
+              text: "Remember: 0 is Green and wins only on direct number bets. It is not Odd/Even, High/Low, or part of Dozens/Columns.",
+            })
+            .setTimestamp()
+            .setImage("https://cdn.imgchest.com/files/4jdcv63jbw4.png"); // Your image URL
+          await message.channel.send({ embeds: [rouletteHelpEmbed] });
+          return;
+        } else {
+          // Not enough arguments, AND they weren't asking for 'help'
+          return message.channel.send(
+            "**Usage:** `roulette <amount | all> <bet_type>`\nType `roulette help` for detailed rules."
+          );
+        }
+      }
+      const now = Date.now();
+      const cooldownAmount = ROULETTE_COOLDOWN_TIME_MS;
+      if (userCooldowns.has(betterId)) {
+        const expirationTime = userCooldowns.get(betterId) + cooldownAmount;
+        if (now < expirationTime) {
+          const timeLeft = (expirationTime - now) / 1000;
+          return message.channel.send(
+            `Please wait ${timeLeft.toFixed(
+              0
+            )} more second(s) before placing another roulette bet.`
+          );
+        }
+      }
+
+      let betAmount;
+      if (args[0] && args[0].toLowerCase() === "all") {
+        betAmount = betterBalance;
+      } else {
+        betAmount = parseInt(args[0]);
+      }
+      const betType = args.slice(1).join(" ").toLowerCase();
+      // Corrected: Validation order and logic for betAmount
+      if (isNaN(betAmount) || betAmount <= 0) {
+        // Check if NOT a number OR zero/negative
+        return message.channel.send(
+          "**Usage:** `!roulette <amount | all> <bet_type>` - Amount must be a positive number."
+        );
+      }
+      const MIN_ROULETTE_BET = 100;
+      if (betAmount < MIN_ROULETTE_BET) {
+        return message.channel.send(
+          `You cannot bet less than ${nexus_coin} ${MIN_ROULETTE_BET} on roulette.`
+        );
+      }
+
+      const MAX_ROULETTE_BET = 300000;
+      if (betAmount > MAX_ROULETTE_BET) {
+        return message.channel.send(
+          `You cannot bet more than ${nexus_coin} ${MAX_ROULETTE_BET} on roulette.`
+        );
+      }
+      // Corrected: Insufficient funds check should be after max bet limit
+      if (betAmount > betterBalance) {
+        return message.channel.send(
+          `You don't have enough currency! Your current balance is ${nexus_coin} ${betterBalance}.`
+        ); // Added nexus_coin
+      }
+
+      const validStringBets = [
+        "red",
+        "black",
+        "odd",
+        "even",
+        "low",
+        "high",
+        "1st",
+        "2nd",
+        "3rd",
+        "col1",
+        "col2",
+        "col3",
+      ];
+
+      let isValidBetType = false;
+      let finalBetTypeForGame = betType;
+
+      const numBet = parseInt(betType);
+      if (
+        betType === numBet.toString() &&
+        !isNaN(numBet) &&
+        numBet >= 0 &&
+        numBet <= 36
+      ) {
+        isValidBetType = true;
+        finalBetTypeForGame = numBet.toString();
+      } else if (validStringBets.includes(betType)) {
+        isValidBetType = true;
+      }
+
+      if (!isValidBetType) {
+        return message.channel.send(
+          "Invalid bet type. Please bet on:\n" +
+            "• A number (0-36)\n" +
+            "• Color (red/black)\n" +
+            "• Odd/Even (odd/even)\n" +
+            "• High/Low (high/low)\n" +
+            "• Dozen (1st/2nd/3rd)\n" + // Corrected in message
+            "• Column (col1/col2/col3)"
+        );
+      }
+
+      await updateUserBalance(betterId, -betAmount);
+      const channelId = message.channel.id;
+
+      if (!activeRouletteGames[channelId]) {
+        // No active game in this channel, so start a new one!
+        activeRouletteGames[channelId] = {
+          bets: [],
+          initialMessage: null, // To store the embed message we send
+          timer: null, // To store the setTimeout ID
+          roundStartTime: now,
+          winningNumber: null, // Will be set after betting phase
+        };
+        const initialEmbed = new EmbedBuilder()
+          .setColor(0xffa500) // Orange color for betting phase
+          .setTitle(
+            "<:rouletteWheel:1397521672243777566> Roulette Betting Round!"
+          )
+          .setDescription(
+            `A new roulette round has started by **${message.author.username}**!` +
+              `\nPlace your bets using -> \nroulette <amount> <bet_type>\``
+          )
+          .addFields(
+            {
+              name: "Time Remaining - ",
+              value: `${Math.max(
+                0,
+                (activeRouletteGames[channelId].roundStartTime +
+                  ROULETTE_BETTING_TIME_MS -
+                  now) /
+                  1000
+              ).toFixed(0)} seconds`,
+              inline: true,
+            },
+            {
+              name: "Current Bets",
+              value: `No bets placed yet.`,
+              inline: false,
+            }
+          )
+          .setFooter({ text: `Round started by ${message.author.tag}` })
+          .setTimestamp();
+
+        const sentEmbedMessage = await message.channel.send({
+          embeds: [initialEmbed],
+        });
+        activeRouletteGames[channelId].initialMessage = sentEmbedMessage;
+
+        // Set the timer to reveal results
+        activeRouletteGames[channelId].timer = setTimeout(() => {
+          revealRouletteResult(channelId);
+        }, ROULETTE_BETTING_TIME_MS);
+      } else {
+        // Game is already active in this channel, just add the bet
+        const game = activeRouletteGames[channelId];
+        const timeRemaining = Math.max(
+          0,
+          (game.roundStartTime + ROULETTE_BETTING_TIME_MS - now) / 1000
+        );
+
+        message.channel.send(
+          `**${
+            message.author.username
+          }** has placed a bet of ${nexus_coin} **${betAmount}** on **${betType}** (Time remaining: ${timeRemaining.toFixed(
+            0
+          )}s).`
+        );
+      }
+      activeRouletteGames[channelId].bets.push({
+        userId: betterId,
+        username: message.author.username, // Store username for display
+        betAmount: betAmount,
+        betType: finalBetTypeForGame, // Store the normalized bet type
+        messageLink: message.url, // Store link to the bet message
+      });
+      const game = activeRouletteGames[channelId];
+      const betCount = game.bets.length;
+      let currentBetsDescription = `**${betCount}** bet(s) placed so far.`;
+      if (betCount > 0) {
+        const topBets = game.bets.slice(0, 5); // Show top 5 recent bets
+        currentBetsDescription +=
+          "\n" +
+          topBets
+            .map(
+              (bet) =>
+                `**${bet.username}**: ${nexus_coin} ${bet.betAmount} on ${bet.betType}`
+            )
+            .join("\n");
+        if (betCount > 5) currentBetsDescription += "\n...and more!";
+      }
+      const timeRemainingField = {
+        name: "Time Remaining",
+        value: `${Math.max(
+          0,
+          (activeRouletteGames[channelId].roundStartTime +
+            ROULETTE_BETTING_TIME_MS -
+            now) /
+            1000
+        ).toFixed(0)} seconds`,
+        inline: true,
+      };
+      const currentBetsField = {
+        name: "Current Bets",
+        value: currentBetsDescription,
+        inline: false,
+      };
+
+      if (game.initialMessage) {
+        const updatedEmbed = EmbedBuilder.from(
+          game.initialMessage.embeds[0]
+        ).setFields(timeRemainingField, currentBetsField);
+        await game.initialMessage.edit({ embeds: [updatedEmbed] });
+      }
+      userCooldowns.set(betterId, now);
+      setTimeout(() => userCooldowns.delete(betterId), cooldownAmount);
+
+      return;
+    } else if (commandName === "blackjack" || commandName === "bj") {
+      if (args.length === 0 || args[0].toLowerCase() === "help") {
+        const blackjackHelpEmbed = new EmbedBuilder()
+          .setColor(0x0000ff)
+          .setTitle(`How to Play Bjackjack`)
+          .setDescription(
+            "**Goal:** Get your hand value as close to 21 as possible without going over.\n" +
+              "**Card Values:** Numbers are face value, J/Q/K are 10, Ace is 1 or 11.\n" +
+              "**Blackjack:** An Ace and a 10-value card on the initial deal (21 total).\n\n" +
+              "**Game Flow:**\n" +
+              "1. `!blackjack <amount>` to start a game.\n" +
+              "2. Type `!hit` to take another card.\n" +
+              "3. Type `!stand` to end your turn.\n" +
+              // Add more rules if you implement double down/split later
+              "• Dealer hits on 16 or less, stands on 17 or more."
+          )
+          .addFields(
+            {
+              name: "Payouts",
+              value: "win: `1:1`\nBlackjack: `3:2`\nPush (Tie): Bet returned",
+              inline: false,
+            },
+            {
+              name: "Commands",
+              value:
+                "`!blackjack <amount>` (start game)\n`!hit` (take card)\n`!stand` (end turn)",
+              inline: false,
+            }
+          )
+          .setFooter({ text: "Good luck!" })
+          .setTimestamp();
+        await message.channel.send({ embeds: [blackjackHelpEmbed] });
+        return;
+      } //embed bracket
+      if (activeBlackjackGames[userId]) {
+        return message.channel.send(
+          "You are already in an acitve Blackjack game! Type `!hit` or `!stand`."
+        );
+      }
+      const betAmount = parseInt(args[0]);
+      if (isNaN(betAmount) || betAmount <= 0) {
+        return message.channel.send(
+          "Please specify a valid positive amount to bet on Blackjack."
+        );
+      }
+      if (betAmount > currentBalance) {
+        return message.channel.send("You don't have enough currency!");
+      }
+      const BLACKJACK_MAX_BET = 300000;
+      if (betAmount > BLACKJACK_MAX_BET) {
+        // Use the new MAX_BET
+        return message.channel.send(
+          `You cannot bet more than ${nexus_coin} ${BLACKJACK_MAX_BET} on Blackjack.`
+        );
+      }
+      await updateUserBalance(userId, -betAmount);
+
+      const deck = createDeck();
+      const playerHand = [drawCard(deck), drawCard(deck)];
+      const dealerHand = [drawCard(deck), drawCard(deck)];
+      const playerHandValue = calculateHandValue(playerHand);
+      const dealerHandValue = calculateHandValue(dealerHand);
+
+      activeBlackjackGames[userId] = {
+        channelId: message.channel.id,
+        gameMessage: null, // Will store the message object for editing
+        deck: deck,
+        playerHand: playerHand,
+        dealerHand: dealerHand,
+        betAmount: betAmount,
+        playerTurn: true, // It's player's turn initially
+        playerStand: false, // Player hasn't stood yet
+      };
+      let statusMessage = "";
+      let gameOver = false;
+      let finalWinner = null;
+      if (playerHandValue.isBlackjack && dealerHandValue.isBlackjack) {
+        statusMessage = "Both you and the dealer got Blackjack! It's a Push!";
+        finalWinner = "push";
+        gameOver = true;
+      } else if (playerHandValue.isBlackjack) {
+        statusMessage = "Blackjack! You win!";
+        finalWinner = "player";
+        gameOver = true;
+      } else if (dealerHandValue.isBlackjack) {
+        statusMessage = "Dealer got Blackjack! You lose!";
+        finalWinner = "dealer";
+        gameOver = true;
+      }
+      const initialGameEmbed = getBlackjackEmbed(
+        activeBlackjackGames[userId],
+        message.author,
+        false,
+        statusMessage
+      ); // Dealer card hidden
+
+      const sentGameMessage = await message.channel.send({
+        embeds: [initialGameEmbed],
+        components: initialGameEmbed.components,
+      });
+      activeBlackjackGames[userId].gameMessage = sentGameMessage;
+
+      if (gameOver) {
+        await handleBlackjackPayout(
+          userId,
+          finalWinner,
+          activeBlackjackGames[userId].betAmount,
+          sentGameMessage
+        );
+        delete activeBlackjackGames[userId]; // Clear game state
+      }
+
+      return;
+    } // bj bracket
+    else if (commandName === "hit" || commandName === "h") {
+      // Check if user is in an active game
+      const game = activeBlackjackGames[userId];
+      if (!game || !game.playerTurn) {
+        return message.channel.send(
+          "You are not in an active Blackjack game, or it's not your turn! Start one with `!blackjack <amount>`."
+        );
+      }
+
+      // Player hits: draw a card
+      const newCard = drawCard(game.deck);
+      game.playerHand.push(newCard);
+      const playerHandValue = calculateHandValue(game.playerHand);
+
+      let statusMessage = "";
+      let gameOver = false;
+      let finalWinner = null;
+
+      if (playerHandValue.value > 21) {
+        statusMessage = "You busted! Your hand is over 21. You lose!";
+        finalWinner = "dealer"; // Dealer wins because player busted
+        gameOver = true;
+      }
+
+      // Update the game embed
+      const updatedEmbed = getBlackjackEmbed(
+        game,
+        message.author,
+        false,
+        statusMessage
+      ); // Dealer card still hidden
+      await game.gameMessage.edit({
+        embeds: [updatedEmbed],
+        components: updatedEmbed.components,
+      });
+
+      if (gameOver) {
+        await handleBlackjackPayout(
+          userId,
+          finalWinner,
+          game.betAmount,
+          game.gameMessage
+        );
+        delete activeBlackjackGames[userId];
+      }
+
+      return; // Exit command
+    } //hit bracket
+    else if (commandName === "stand" || commandName === "s") {
+      // Check if user is in an active game
+      const game = activeBlackjackGames[userId];
+      if (!game || !game.playerTurn) {
+        return message.channel.send(
+          "You are not in an active Blackjack game, or it's not your turn! Start one with `!blackjack <amount>`."
+        );
+      }
+
+      game.playerTurn = false; // Player stands, it's now dealer's turn
+      game.playerStand = true;
+
+      // Reveal dealer's hidden card and play dealer's turn
+      let dealerHandValue = calculateHandValue(game.dealerHand);
+      let statusMessage = "You stood. Dealer's turn!\n";
+
+      // Update embed to show revealed dealer card before dealer plays
+      let revealEmbed = getBlackjackEmbed(
+        game,
+        message.author,
+        true,
+        statusMessage + "Dealer reveals their hand..."
+      );
+      await game.gameMessage.edit({
+        embeds: [revealEmbed],
+        components: revealEmbed.components,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1500)); // Short pause
+
+      // Dealer hits until 17 or more (hard 17 or soft 17 depends on ruleset, let's go with common: stand on all 17s)
+      while (dealerHandValue.value < 17) {
+        const newCard = drawCard(game.deck);
+        game.dealerHand.push(newCard);
+        dealerHandValue = calculateHandValue(game.dealerHand);
+
+        statusMessage += `Dealer hits and draws ${getCardDisplay(
+          newCard
+        )}. Dealer's hand is now ${dealerHandValue.value}.\n`;
+        let updatedEmbed = getBlackjackEmbed(
+          game,
+          message.author,
+          true,
+          statusMessage
+        );
+        await game.gameMessage.edit({ embeds: [updatedEmbed] });
+        await new Promise((resolve) => setTimeout(resolve, 1500)); // Pause after each dealer hit
+      }
+
+      let finalWinner = null;
+
+      if (dealerHandValue.value > 21) {
+        statusMessage += "Dealer busted! You win!";
+        finalWinner = "player";
+      } else if (playerHandValue.value > dealerHandValue.value) {
+        // Player has higher value without busting
+        statusMessage += "You win! Your hand is higher than the dealer's.";
+        finalWinner = "player";
+      } else if (dealerHandValue.value > playerHandValue.value) {
+        // Dealer has higher value without busting
+        statusMessage += "Dealer wins! Dealer's hand is higher than yours.";
+        finalWinner = "dealer";
+      } else {
+        // Tied
+        statusMessage += "It's a push! Your bet is returned.";
+        finalWinner = "push";
+      }
+
+      // Final embed update with winner message
+      const finalEmbed = getBlackjackEmbed(
+        game,
+        message.author,
+        true,
+        statusMessage
+      );
+      await game.gameMessage.edit({ embeds: [finalEmbed] });
+
+      await handleBlackjackPayout(
+        userId,
+        finalWinner,
+        game.betAmount,
+        game.gameMessage
+      );
+      delete activeBlackjackGames[userId]; // Clear game state
+
+      return; // Exit command
+    } //stand bracket
+    return;
+  } //messageCreate bracket
+
+  // --- Gemini AI Integration ---
+  // Corrected: 'else' cannot have a condition, must be 'else if'
+  else if (message.mentions.has(client.user.id)) {
+    // Extract the message content after the bot's mention
+    const prompt = message.content
+      .replace(new RegExp(`<@${client.user.id}>`), "")
+      .trim();
+
+    if (!prompt) {
+      return message.channel.send(
+        // Changed to channel.send for consistency
+        "Hello! How can I help you today? Please ask me a question after mentioning me."
+      );
+    }
+
+    try {
+      await message.channel.sendTyping();
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text();
+
+      message.channel.send(text); // Changed to channel.send for consistency
+    } catch (error) {
+      console.error("Error interacting with Gemini API:", error);
+      message.channel.send(
+        // Changed to channel.send for consistency
+        "Sorry, I encountered an error trying to process that. Please try again later."
+      );
+    }
+  }
+});
+client.login(process.env.TOKEN);
+///////////////////////////////////////////////
+function getBlackjackEmbed(
+  game,
+  playerDiscordUser,
+  showDealerCards = false,
+  statusMessage = "",
+  gameIsOver = false
+) {
+  const playerHandValue = calculateHandValue(game.playerHand);
+  const dealerHandValue = calculateHandValue(game.dealerHand);
+
+  // Get card displays
+  const playerHandDisplay = getHandDisplay(game.playerHand);
+  let dealerHandDisplay;
+  let dealerDisplayValue;
+
+  if (showDealerCards) {
+    dealerHandDisplay = getHandDisplay(game.dealerHand);
+    dealerDisplayValue = dealerHandValue.value;
+  } else {
+    // Use your custom backside emoji for the hidden card
+    dealerHandDisplay = `${getCardDisplay(
+      game.dealerHand[0]
+    )} <:BackSide:1398023017396699226>`;
+    dealerDisplayValue = calculateHandValue([game.dealerHand[0]]).value;
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x00ff00) // Green for active game (you can choose colors for different states later)
+    .setAuthor({
+      name: playerDiscordUser.username,
+      iconURL: playerDiscordUser.displayAvatarURL(),
+    })
+    .setDescription(
+      (statusMessage ? `${statusMessage}\n\n` : "") + // Add statusMessage if it exists
+        "**Hit -** Take another card\n" +
+        "**Stand -** End your turn\n" +
+        // These should also be conditional based on game.playerHand.length !== 2 and gameIsOver
+        (game.playerHand.length === 2 && !gameIsOver
+          ? "**Double Down -** Double your bet, hit once, then stand\n"
+          : "")
+    )
+    .addFields(
+      // --- Row 1: Hands (Inline) ---
+      {
+        name: "Your Hand",
+        value: `${playerHandDisplay}\n\nValue: ${playerHandValue.value.toString()}`,
+        inline: true,
+      },
+      {
+        name: "Dealer Hand",
+        value: `${dealerHandDisplay}\n\nValue: ${dealerDisplayValue.toString()}`,
+        inline: true,
+      },
+
+      // --- Row 2: Game Info (Inline where suitable) ---
+      {
+        name: "Cards Remaining:",
+        value: game.deck.length.toString(),
+        inline: false,
+      }
+    )
+    .setTimestamp();
+
+  const row = new ActionRowBuilder();
+
+  row.addComponents(
+    new ButtonBuilder()
+      .setCustomId("blackjack_hit")
+      .setLabel("Hit")
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(gameIsOver || !game.playerTurn), // Disable if game is over or not player's turn
+
+    new ButtonBuilder()
+      .setCustomId("blackjack_stand")
+      .setLabel("Stand")
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(gameIsOver || !game.playerTurn), // Disable if game is over or not player's turn
+
+    new ButtonBuilder()
+      .setCustomId("blackjack_doubledown")
+      .setLabel("Double Down")
+      .setStyle(ButtonStyle.Secondary)
+      // Disable if game is over, not player's turn, or not initial deal (hand length != 2)
+      .setDisabled(
+        gameIsOver || !game.playerTurn || game.playerHand.length !== 2
+      )
+  );
+
+  // Attach the row of buttons to the embed message.
+  // The message.send/edit call will pass this component.
+  embed.components = [row]; // This sets the components on the embed directly for later use in message.send/edit
+
+  return embed;
+}
+async function handleBlackjackPayout(userId, winner, betAmount, gameMessage) {
+  const nexus_coin = "<:nexus_bronze_coin:1396438179288191007>";
+  const game = activeBlackjackGames[userId] || {}; // Use dummy if game cleared prematurely
+  const playerHandValue = calculateHandValue(game.playerHand || []); // Ensure playerHandValue is defined for checks below
+
+  let netChange = 0;
+  let outcomeText = "";
+
+  if (winner === "player") {
+    if (playerHandValue.isBlackjack) {
+      netChange = betAmount * 2.5; // Profit part of 3:2 payout
+      outcomeText = "Blackjack!";
+    } else {
+      netChange = betAmount * 2; // Profit part of 1:1 payout
+      outcomeText = "Win!";
+    }
+    await updateUserBalance(userId, netChange + betAmount); // Add profit PLUS original bet back
+  } else if (winner === "push") {
+    netChange = 0;
+    outcomeText = "Push!";
+    await updateUserBalance(userId, betAmount); // Return original bet
+  } else {
+    // Dealer wins (player loses)
+    netChange = -betAmount;
+    outcomeText = "Loss!"; // General loss. Specific statusMessage from hit/stand will describe "Bust!"
+  }
+
+  const newBalance = await getUserBalance(userId);
+
+  // Build the final result line (e.g., "Result: Bust 💰 -500")
+  let resultLine = `Result: **${outcomeText}** ${nexus_coin} **${
+    netChange > 0 ? "+" : ""
+  }${netChange}**`;
+
+  // Get the current embed from the message to retain previous information
+  const currentEmbed = gameMessage.embeds[0];
+
+  const finalGameEmbed = EmbedBuilder.from(currentEmbed)
+    .setColor(
+      winner === "player" ? 0x00ff00 : winner === "dealer" ? 0xff0000 : 0xffff00
+    ) // Set final color
+    // Combine status message from dealer's turn AND the new result line in description
+    .setDescription(`${currentEmbed.description}\n\n${resultLine}`) // Added double newline for spacing
+    .setFields(currentEmbed.fields) // Carry over existing fields
+    .setFooter({
+      text: `Blackjack! Game Over.`,
+    })
+    .setTimestamp();
+
+  await gameMessage.edit({
+    embeds: [finalGameEmbed],
+    components: [], // Clear components as game is over
+  });
+}
+async function playDealersTurnAndDetermineWinner(
+  userId,
+  game,
+  playerDiscordUser,
+  gameMessage,
+  initialStatusMessage = ""
+) {
+  let dealerHandValue = calculateHandValue(game.dealerHand);
+  let statusMessage = initialStatusMessage;
+  let dealerActions = []; // To store descriptions of each card dealer draws
+
+  // 1. Reveal dealer's hidden card (This is ONE intentional update)
+const revealEmbedData = getBlackjackEmbed(
+  game,
+  playerDiscordUser,
+  true,
+  "Dealer reveals their hand.",
+  false
+);
+await gameMessage.edit({
+  embeds: [revealEmbedData.embed],
+  components: revealEmbedData.components,
+});
+await new Promise(resolve => setTimeout(resolve, 100));
+statusMessage = ""; 
+  // 2. Dealer hits until 17 or more (Collect all actions, DO NOT UPDATE EMBED HERE)
+  while (dealerHandValue.value < 17) {
+    const newCard = drawCard(game.deck);
+    game.dealerHand.push(newCard); // Add card to hand
+    dealerHandValue = calculateHandValue(game.dealerHand); // Recalculate hand value
+
+    // --- CRITICAL FIX: Only collect action string. DO NOT use gameMessage.edit() or setTimeout() inside this loop! ---
+    dealerActions.push(
+      `Dealer hits and draws ${getCardDisplay(newCard)}. Dealer's hand is now ${
+        dealerHandValue.value
+      }.`
+    );
+  }
+statusMessage += dealerActions.join("\n");
+  // 3. Add all collected dealer actions to the status message (ONLY ONCE, AFTER THE LOOP)
+if (dealerActions.length > 0) {
+  statusMessage += `\nDealer's final hand is ${dealerHandValue.value}.\n`;
+} else {
+  statusMessage += "Dealer stands.\n";
+} 
+
+  // 4. Determine final winner and outcome text
+  let finalWinner = null;
+  const finalPlayerHandValue = calculateHandValue(game.playerHand); // Recalculate player hand value for comparison
+
+  if (dealerHandValue.value > 21) {
+    statusMessage += "Dealer busted! You win!";
+    finalWinner = "player";
+  } else if (finalPlayerHandValue.value > dealerHandValue.value) {
+    statusMessage += "You win! Your hand is higher.";
+    finalWinner = "player";
+  } else if (dealerHandValue.value > finalPlayerHandValue.value) {
+    statusMessage += "Dealer wins! Dealer's hand is higher.";
+    finalWinner = "dealer";
+  } else {
+    statusMessage += "It's a push!";
+    finalWinner = "push";
+  }
+
+  // 5. Final embed update (ONLY ONE UPDATE for all dealer's actions + final result)
+const final = getBlackjackEmbed(game, playerDiscordUser, true, statusMessage, true);
+await gameMessage.edit({
+  embeds: [final.embed],
+  components: final.components,
+});
+
+  // Handle payout and clear game state
+  await handleBlackjackPayout(userId, finalWinner, game.betAmount, gameMessage);
+  delete activeBlackjackGames[userId]; // Clear game state
+}
+
+////////////////////
+
+function getBlackjackEmbed(
+  game,
+  playerDiscordUser,
+  showDealerCards = false,
+  statusMessage = "",
+  gameIsOver = false
+) {
+  const playerHandValue = calculateHandValue(game.playerHand);
+  const dealerHandValue = calculateHandValue(game.dealerHand);
+
+  // Get card displays
+  const playerHandDisplay = getHandDisplay(game.playerHand);
+  let dealerHandDisplay;
+  let dealerDisplayValue;
+
+  if (showDealerCards) {
+    dealerHandDisplay = getHandDisplay(game.dealerHand);
+    dealerDisplayValue = dealerHandValue.value;
+  } else {
+    // Use your custom backside emoji for the hidden card
+    dealerHandDisplay = `${getCardDisplay(
+      game.dealerHand[0]
+    )} <:BackSide:1398023017396699226>`;
+    dealerDisplayValue = calculateHandValue([game.dealerHand[0]]).value;
+  }
+
+  // Dynamic embed color based on game state
+  let embedColor;
+  if (gameIsOver || playerHandValue.value > 21) {
+    if (playerHandValue.value > 21) {
+      embedColor = 0xFF0000; // Red for player bust
+    } else if (statusMessage.includes("You win")) {
+      embedColor = 0x00FF00; // Green for win
+    } else if (statusMessage.includes("push")) {
+      embedColor = 0xFFFF00; // Yellow for push
+    } else {
+      embedColor = 0xFF0000; // Red for loss
+    }
+  } else {
+    embedColor = 0x00FF00; // Green for active game
+  }
+
+  // Description based on game state
+  let description;
+  if (gameIsOver || playerHandValue.value > 21) {
+    description = (statusMessage ? `${statusMessage}\n\n` : "") + 
+      `**Blackjack! Game Over.** • ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`;
+  } else {
+    description = (statusMessage ? `${statusMessage}\n\n` : "") +
+      "**Hit -** Take another card\n" +
+      "**Stand -** End your turn\n" +
+      (game.playerHand.length === 2 && !gameIsOver
+        ? "**Double Down -** Double your bet, hit once to stand\n"
+        : "");
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(embedColor)
+    .setAuthor({
+      name: playerDiscordUser.username,
+      iconURL: playerDiscordUser.displayAvatarURL(),
+    })
+    .setDescription(description)
+    .addFields(
+      // --- Row 1: Hands (Inline) ---
+      {
+        name: "Your Hand",
+        value: `${playerHandDisplay}\n\nValue: ${playerHandValue.value.toString()}`,
+        inline: true,
+      },
+      {
+        name: "Dealer Hand",
+        value: `${dealerHandDisplay}\n\nValue: ${dealerDisplayValue.toString()}`,
+        inline: true,
+      },
+      // --- Row 2: Game Info (Inline where suitable) ---
+      {
+        name: "Cards Remaining:",
+        value: game.deck.length.toString(),
+        inline: false,
+      }
+    )
+    .setTimestamp();
+
+  const row = new ActionRowBuilder();
+
+  row.addComponents(
+    new ButtonBuilder()
+      .setCustomId("blackjack_hit")
+      .setLabel("Hit")
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(gameIsOver || !game.playerTurn || playerHandValue.value > 21),
+
+    new ButtonBuilder()
+      .setCustomId("blackjack_stand")
+      .setLabel("Stand")
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(gameIsOver || !game.playerTurn || playerHandValue.value > 21),
+
+    new ButtonBuilder()
+      .setCustomId("blackjack_doubledown")
+      .setLabel("Double Down")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(
+        gameIsOver || !game.playerTurn || game.playerHand.length !== 2 || playerHandValue.value > 21
+      )
+  );
+
+  return {
+    embed: embed,
+    components: [row]
+  };
+}
+
+////////////////////////////////////////////////////
+
+if (customId === "blackjack_hit") {
+      // Re-use logic from your !hit command handler
+      // (You might want to extract core hit logic into a separate function for reusability)
+
+      const newCard = drawCard(game.deck);
+      game.playerHand.push(newCard);
+      const playerHandValue = calculateHandValue(game.playerHand);
+
+      let statusMessage = "";
+      let gameOver = false;
+      let finalWinner = null;
+
+      if (playerHandValue.value > 21) {
+        statusMessage = "You busted! Your hand is over 21. You lose!";
+        finalWinner = "dealer";
+        gameOver = true;
+      }
+
+      // Update the embed via the original game message
+      const updatedEmbedHit = getBlackjackEmbed(
+        game,
+        interaction.user,
+        false,
+        statusMessage,
+        gameOver
+      );
+      await game.gameMessage.edit({
+        embeds: [updatedEmbedHit],
+        components: updatedEmbedHit.components,
+      });
+
+      if (gameOver) {
+        await handleBlackjackPayout(
+          userId,
+          finalWinner,
+          game.betAmount,
+          game.gameMessage
+        );
+        delete activeBlackjackGames[userId];
+      }
+    } else if (customId === "blackjack_stand") {
+      // Re-use logic from your !stand command handler
+
+      game.playerTurn = false;
+      game.playerStand = true;
+
+      let dealerHandValue = calculateHandValue(game.dealerHand);
+      let statusMessage = "You stood. Dealer's turn!\n";
+
+      let revealEmbed = getBlackjackEmbed(
+        game,
+        interaction.user,
+        true,
+        statusMessage + "Dealer reveals their hand..."
+      );
+      await game.gameMessage.edit({
+        embeds: [revealEmbed],
+        components: revealEmbed.components,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      while (dealerHandValue.value < 17) {
+        const newCard = drawCard(game.deck);
+        game.dealerHand.push(newCard);
+        dealerHandValue = calculateHandValue(game.dealerHand);
+
+        statusMessage += `Dealer hits and draws ${getCardDisplay(
+          newCard
+        )}. Dealer's hand is now ${dealerHandValue.value}.\n`;
+        let updatedEmbed = getBlackjackEmbed(
+          game,
+          interaction.user,
+          true,
+          statusMessage
+        );
+        await game.gameMessage.edit({
+          embeds: [updatedEmbed],
+          components: updatedEmbed.components,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+
+      let finalWinner = null;
+      const playerHandValue = calculateHandValue(game.playerHand); // Recalculate player hand value for comparison
+
+      if (dealerHandValue.value > 21) {
+        statusMessage += "Dealer busted! You win!";
+        finalWinner = "player";
+      } else if (playerHandValue.value > dealerHandValue.value) {
+        statusMessage += "You win! Your hand is higher than the dealer's.";
+        finalWinner = "player";
+      } else if (dealerHandValue.value > playerHandValue.value) {
+        statusMessage += "Dealer wins! Dealer's hand is higher than yours.";
+        finalWinner = "dealer";
+      } else {
+        statusMessage += "It's a push! Your bet is returned.";
+        finalWinner = "push";
+      }
+
+      const finalEmbedStand = getBlackjackEmbed(
+        game,
+        interaction.user,
+        true,
+        statusMessage,
+        true
+      );
+      await game.gameMessage.edit({
+        embeds: [finalEmbedStand],
+        components: finalEmbedStand.components,
+      });
+
+      await handleBlackjackPayout(
+        userId,
+        finalWinner,
+        game.betAmount,
+        game.gameMessage
+      );
+      delete activeBlackjackGames[userId];
+    } else if (customId === "blackjack_doubledown") {
+      const playerBalance = await getUserBalance(userId); // Get fresh balance for double down
+      const doubleBetAmount = game.betAmount; // Original bet amount
+
+      // 1. Validate Double Down conditions
+      if (game.playerHand.length !== 2) {
+        return await interaction.followUp({
+          content: "You can only Double Down on your first two cards!",
+          ephemeral: true,
+        });
+      }
+      if (playerBalance < doubleBetAmount) {
+        // Check if player has enough to double
+        return await interaction.followUp({
+          content: `You don't have enough to double down! You need ${nexus_coin} ${doubleBetAmount} more.`,
+          ephemeral: true,
+        });
+      }
+
+      // 2. Deduct the additional bet
+      await updateUserBalance(userId, -doubleBetAmount);
+      game.betAmount += doubleBetAmount; // Update game's total bet amount for payout calculation
+
+      // 3. Draw exactly one card
+      const newCard = drawCard(game.deck);
+      game.playerHand.push(newCard);
+      const playerHandValue = calculateHandValue(game.playerHand);
+
+      let statusMessage = `You doubled down and drew ${getCardDisplay(
+        newCard
+      )}. Your hand is now ${playerHandValue.value}.\n`;
+      let gameOver = false;
+      let finalWinner = null;
+
+      if (playerHandValue.value > 21) {
+        statusMessage += "You busted! Your hand is over 21. You lose!";
+        finalWinner = "dealer";
+        gameOver = true;
+      }
+
+      // 4. Update the embed to show current state after the draw
+      const updatedEmbedDoubleDown = getBlackjackEmbed(
+        game,
+        interaction.user, // Use interaction.user as the playerDiscordUser
+        false, // Dealer card still hidden for this display
+        statusMessage,
+        gameOver
+      );
+      await game.gameMessage.edit({
+        embeds: [updatedEmbedDoubleDown],
+        components: updatedEmbedDoubleDown.components,
+      });
+
+      // 5. Automatically Stand (proceed to dealer's turn if not busted)
+      if (gameOver) {
+        // If busted immediately after double down
+        await handleBlackjackPayout(
+          userId,
+          finalWinner,
+          game.betAmount,
+          game.gameMessage
+        );
+        delete activeBlackjackGames[userId];
+      } else {
+        // If not busted, proceed to dealer's turn
+        await playDealersTurnAndDetermineWinner(
+          userId,
+          game,
+          interaction.user,
+          game.gameMessage,
+          statusMessage
+        );
+
+////////////////
+db.js 
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
+
+// Connect to the database
+// The database file will be created in the same directory as your bot's main script
+const dbPath = path.resolve(__dirname, 'aqua.db');
+const db = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+        console.error('Error connecting to database:', err.message);
+    } else {
+        console.log('Connected to the SQLite database.');
+    }
+});
+
+// Initialize the database: Create the 'users' table if it doesn't exist
+function initDb() {
+    return new Promise((resolve, reject) => {
+        db.run(`
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                balance INTEGER DEFAULT 1000
+            )
+        `, (err) => {
+            if (err) {
+                console.error('Error creating users table:', err.message);
+                reject(err);
+            } else {
+                console.log('Users table checked/created successfully.');
+                resolve();
+            }
+        });
+    });
+}
+
+// Get user balance
+function getUserBalance(userId) {
+    return new Promise((resolve, reject) => {
+        // Insert user if they don't exist, then retrieve balance
+        db.run('INSERT OR IGNORE INTO users (user_id) VALUES (?)', [userId], function(err) {
+            if (err) {
+                console.error('Error inserting new user:', err.message);
+                return reject(err);
+            }
+            db.get('SELECT balance FROM users WHERE user_id = ?', [userId], (err, row) => {
+                if (err) {
+                    console.error('Error getting user balance:', err.message);
+                    reject(err);
+                } else {
+                    resolve(row ? row.balance : 1000); // Should always find a row due to INSERT OR IGNORE
+                }
+            });
+        });
+    });
+}
+
+// Update user balance
+function updateUserBalance(userId, amount) {
+    return new Promise((resolve, reject) => {
+        db.run('UPDATE users SET balance = balance + ? WHERE user_id = ?', [amount, userId], function(err) {
+            if (err) {
+                console.error('Error updating user balance:', err.message);
+                reject(err);
+            } else if (this.changes === 0) {
+                // This means the user_id wasn't found, which shouldn't happen if getUserBalance is called first
+                // but good to handle defensively.
+                reject(new Error(`User with ID ${userId} not found for balance update.`));
+            } else {
+                resolve();
+            }
+        });
+    });
+}
+function deleteUser(userId) {
+    return new Promise((resolve, reject) => {
+        db.run('DELETE FROM users WHERE user_id = ?', [userId], function(err) {
+            if (err) {
+                console.error('Error deleting user:', err.message);
+                reject(err);
+            } else {
+                // 'this.changes' property indicates the number of rows affected by the last query.
+                if (this.changes > 0) {
+                    console.log(`User ${userId} deleted successfully.`);
+                    resolve(true); // User was found and deleted
+                } else {
+                    console.log(`User ${userId} not found in database.`);
+                    resolve(false); // User was not found
+                }
+            }
+        });
+    });
+}
+
+module.exports = {
+    initDb,
+    getUserBalance,
+    updateUserBalance,
+    deleteUser,
+    db // Export the db instance if you need it directly elsewhere (e.g., for closing)
+};
