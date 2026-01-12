@@ -95,12 +95,19 @@ const nexusCommands = [
   new SlashCommandBuilder()
     .setName("ping")
     .setDescription("Replies with pong!"),
+
+    new SlashCommandBuilder()
+    .setName("roll")
+    .setDescription("Roll a dice (e.g. 1d20, 2d6)")
+    .addStringOption((o) =>
+      o.setName("dice").setDescription("Dice notation (e.g. 1d20)")
+      .setRequired(true)),
 ]
   // IMPORTANT: Convert these builders to JSON for the API
   .map((command) => command.toJSON());
 
 // 3. Load File-Based Commands (General) - Intended for Grimoire?
-const generalCommands = []; // This was missing in your code
+const generalCommands = []; 
 const commandsPath = path.join(__dirname, "commands");
 
 // Check if folder exists to prevent crash

@@ -5,7 +5,6 @@ delete.sql
 discloud.config
 epub.txt
 roles.db
-Aqua.session.sql
 quest.txt
 untitle.excalidraw
 utils.js
@@ -14,7 +13,9 @@ roulettegame.js
 blackjackgame.js
 coinflip.js
 db.js
-aqua.db
 pfp.js
 daily.txt
 bot.txt
+gambling.txt
+package-lock.json
+untitled.excalidraw

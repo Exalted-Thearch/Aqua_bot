@@ -18,7 +18,8 @@ const {
 const sqlite3 = require("sqlite3").verbose();
 const { open } = require("sqlite");
 const axios = require("axios");
-
+const fs = require("node:fs");
+const path = require("node:path");
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -53,6 +54,21 @@ let forumCache = [];
 let lastCacheUpdate = 0;
 const CACHE_DURATION = 24 * 60 * 60 * 1000;
 
+const commandsPath = path.join(__dirname, "commands");
+const commandFiles = fs
+  .readdirSync(commandsPath)
+  .filter(file => file.endsWith(".js"));
+
+for (const file of commandFiles) {
+  const filePath = path.join(commandsPath, file);
+  const command = require(filePath);
+
+  if (command.data && command.execute) {
+    client.commands.set(command.data.name, command);
+  } else {
+    console.warn(`[WARN] ${file} missing data or execute`);
+  }
+}
 function simpleSimilarity(str1, str2) {
   const longer = str1.length > str2.length ? str1 : str2;
   const shorter = str1.length > str2.length ? str2 : str1;
@@ -317,6 +333,20 @@ function parseDuration(input) {
 client.on("interactionCreate", async (interaction) => {
   // Handle Chat Input Commands (Slash Commands)
   if (!interaction.isChatInputCommand()) return;
+
+  const command = client.commands.get(interaction.commandName);
+  if (!command) return;
+
+  try {
+    await command.execute(interaction);
+  } catch (error) {
+    console.error(error);
+    await interaction.reply({
+      content: "There was an error while executing this command!",
+      ephemeral: true,
+    });
+  }
+
   const { commandName } = interaction;
   if (commandName === "ping") {
     await interaction.reply(
@@ -588,9 +618,16 @@ client.on("interactionCreate", async (interaction) => {
         [targetUser.id, targetRole.id, targetRole.id]
       );
 
-      await interaction.reply(
-        `<a:correct:1459492234834739368> Assigned ${targetRole} to ${targetUser} (booster role).`
-      );
+      const embed = new EmbedBuilder()
+        .setColor(0x57f287) // Discord green
+        .setDescription(
+          `<a:correct:1459492234834739368> Assigned ${targetRole} to ${targetUser} (booster role).`
+        );
+
+      await interaction.reply({
+        embeds: [embed],
+        allowedMentions: { parse: [] },
+      });
     } catch (e) {
       console.error("Assign role error:", e);
 
