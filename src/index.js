@@ -1,22 +1,17 @@
 require("dotenv").config();
 const stringSimilarity = require("string-similarity");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-
+const connectMongo = require("./database/mongo");
+const UserRole = require("./database/UserRole");
 const {
   Client,
   ActivityType,
   GatewayIntentBits,
   Collection,
   EmbedBuilder,
-  ButtonBuilder,
-  ActionRowBuilder,
-  ButtonStyle,
-  SlashCommandBuilder,
   PermissionFlagsBits,
   Routes,
 } = require("discord.js");
-const sqlite3 = require("sqlite3").verbose();
-const { open } = require("sqlite");
 const axios = require("axios");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -24,7 +19,6 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildPresences,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMessages,
   ],
@@ -32,32 +26,19 @@ const client = new Client({
 
 const cooldowns = new Map();
 // --- DATABASE SETUP ---
-let db;
-async function initDB() {
-  db = await open({
-    filename: "./roles.db",
-    driver: sqlite3.Database,
-  });
+// --- DATABASE SETUP ---
+// MongoDB handled by connectMongo
 
-  await db.exec(`
-        CREATE TABLE IF NOT EXISTS user_roles (
-            user_id TEXT PRIMARY KEY,
-            role_id TEXT,
-            is_temp INTEGER DEFAULT 0,
-            expiry_date INTEGER
-        )
-    `);
-}
 client.commands = new Collection();
 const prefix = "!";
 let forumCache = [];
 let lastCacheUpdate = 0;
-const CACHE_DURATION = 24 * 60 * 60 * 1000;
+const CACHE_DURATION = 2 * 24 * 60 * 60 * 1000;
 
 const commandsPath = path.join(__dirname, "commands");
 const commandFiles = fs
   .readdirSync(commandsPath)
-  .filter(file => file.endsWith(".js"));
+  .filter((file) => file.endsWith(".js"));
 
 for (const file of commandFiles) {
   const filePath = path.join(commandsPath, file);
@@ -69,62 +50,23 @@ for (const file of commandFiles) {
     console.warn(`[WARN] ${file} missing data or execute`);
   }
 }
-function simpleSimilarity(str1, str2) {
-  const longer = str1.length > str2.length ? str1 : str2;
-  const shorter = str1.length > str2.length ? str2 : str1;
 
-  if (longer.length === 0) return 1.0;
-
-  if (longer.includes(shorter)) {
-    return shorter.length / longer.length;
-  }
-
-  const words1 = str1.split(/\s+/);
-  const words2 = str2.split(/\s+/);
-  const commonWords = words1.filter((word) => words2.includes(word));
-
-  return commonWords.length / Math.max(words1.length, words2.length);
-}
-function simpleSimilarity(a, b) {
-  if (!a || !b) return 0;
-  a = a.toLowerCase();
-  b = b.toLowerCase();
-  if (a === b) return 1;
-  if (a.length < 2 || b.length < 2) return 0;
-
-  const bigramsA = [];
-  const bigramsB = [];
-  for (let i = 0; i < a.length - 1; i++) bigramsA.push(a.substring(i, i + 2));
-  for (let i = 0; i < b.length - 1; i++) bigramsB.push(b.substring(i, i + 2));
-
-  let intersections = 0;
-  for (const gramA of bigramsA) {
-    const index = bigramsB.indexOf(gramA);
-    if (index > -1) {
-      intersections++;
-      bigramsB.splice(index, 1);
-    }
-  }
-  return (
-    (2.0 * intersections) /
-    (bigramsA.length + bigramsB.length + 2 * intersections)
-  );
-}
 // --- HELPER: FETCH FORUM POSTS (UNLIMITED VERSION) ---
 async function fetchAllForumPosts(guild) {
   const now = Date.now();
 
   // 1. Return cached data if valid
   if (forumCache.length > 0 && now - lastCacheUpdate < CACHE_DURATION) {
-    console.log("⚡ Using cached forum posts");
     return forumCache;
   }
 
   console.log("🔄 Fetching ALL forum posts (this may take a moment)...");
 
   const channels = await guild.channels.fetch();
-  let allForumPosts = [];
   const forumChannels = channels.filter((channel) => channel.type === 15);
+
+  let allForumPosts = [];
+  const seenIds = new Set();
 
   // 2. Process each forum channel
   await Promise.all(
@@ -142,7 +84,7 @@ async function fetchAllForumPosts(guild) {
           const options = { limit: 100 };
           if (lastThreadId) options.before = lastThreadId;
 
-          // Fetch the next batch of 100
+          // Fetch the next batch of 100 archived threads
           const archived = await channel.threads.fetchArchived(options);
           const fetchedThreads = [...archived.threads.values()];
 
@@ -158,9 +100,15 @@ async function fetchAllForumPosts(guild) {
           }
         }
 
-        // C. Tag and Add to List
-        channelThreads.forEach((t) => (t.parentName = channel.name));
-        allForumPosts = allForumPosts.concat(channelThreads);
+        // C. Tag and Add to List, avoiding duplicates
+        for (const thread of channelThreads) {
+          if (!seenIds.has(thread.id)) {
+            thread.parentName = channel.name;
+            allForumPosts.push(thread);
+            seenIds.add(thread.id);
+          }
+        }
+
         console.log(
           `📚 Fetched ${channelThreads.length} threads from ${channel.name}`
         );
@@ -177,15 +125,60 @@ async function fetchAllForumPosts(guild) {
   console.log(`✅ Total Cached: ${allForumPosts.length} epubs.`);
   return allForumPosts;
 }
-async function logAction(guild, message) {
-  const logChannelId = process.env.LOG_CHANNEL_ID;
-  const logChannel = guild.channels.cache.get(logChannelId);
-  if (logChannel) {
-    const embed = new EmbedBuilder()
-      .setDescription(message)
-      .setColor("#3498db")
-      .setTimestamp();
-    await logChannel.send({ embeds: [embed] });
+
+async function getLogChannel(envVarName) {
+  const guildId = process.env.TEST_SERVER;
+  const channelId = process.env[envVarName];
+
+  if (!guildId || !channelId) {
+    console.warn(`Missing env vars: TEST_SERVER or ${envVarName}`);
+    return null;
+  }
+
+  try {
+    const guild = await client.guilds.fetch(guildId);
+    if (!guild) return null;
+    return await guild.channels.fetch(channelId);
+  } catch (e) {
+    console.error(`Failed to fetch log channel ${envVarName}:`, e);
+    return null;
+  }
+}
+
+async function logInfo(message) {
+  const channel = await getLogChannel("INFO_LOG");
+  if (!channel) return;
+
+  const embed = new EmbedBuilder()
+    .setDescription(message)
+    .setColor("#3498db") // Blue
+    .setTimestamp();
+
+  try {
+    await channel.send({ embeds: [embed] });
+  } catch (e) {
+    console.error("Failed to send INFO log:", e);
+  }
+}
+
+async function logError(error, context = "General") {
+  const channel = await getLogChannel("ERROR_LOG");
+  if (!channel) return;
+
+  const embed = new EmbedBuilder()
+    .setTitle(`❌ Error: ${context}`)
+    .setDescription(
+      `**Message**: ${error.message}\n\`\`\`${
+        error.stack ? error.stack.slice(0, 1000) : "No stack"
+      }\`\`\``
+    )
+    .setColor("#e74c3c") // Red
+    .setTimestamp();
+
+  try {
+    await channel.send({ embeds: [embed] });
+  } catch (e) {
+    console.error("Failed to send ERROR log:", e);
   }
 }
 
@@ -215,6 +208,16 @@ function resolveColor(hex) {
   const cleanHex = hex.replace("#", "");
   const val = parseInt(cleanHex, 16);
   return isNaN(val) ? null : val;
+}
+
+function formatDiscordError(error) {
+  if (error.message.includes("Invalid Form Body")) {
+    if (error.message.includes("name[BASE_TYPE_MAX_LENGTH]")) {
+      return "Role name is too long (max 100 characters).";
+    }
+    // Add other specific mappings here if needed
+  }
+  return error.message;
 }
 
 // --- GRADIENT API LOGIC ---
@@ -259,33 +262,19 @@ async function updateRoleColors(guildId, roleId, primaryHex, secondaryHex) {
 }
 client.on("ready", async (c) => {
   console.log(`✅ Logged in as ${c.user.tag}!`);
-  await initDB();
-  console.log("Database initialized and ready.");
 
-  const guild = client.guilds.cache.get(process.env.GRIMOIRE_SERVER);
+  await connectMongo();
+  console.log("✅ MongoDB initialized and ready.");
+
+
   setInterval(async () => {
     try {
-      const fetchedMembers = await guild.members.fetch({
-        withPresences: true,
-        force: false, // Use cache unless needed
-      });
-
-      const totalOnline = fetchedMembers.filter(
-        (member) =>
-          member.presence?.status === "online" ||
-          member.presence?.status === "idle"
-      ).size;
-
       const status = [
         // {
         //   name: "EveOfChaos",
         //   type: ActivityType.Streaming,
         //   url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         // },
-        {
-          name: `${totalOnline} online members`,
-          type: ActivityType.Watching,
-        },
         {
           name: "Listening to Spotify",
           type: ActivityType.Listening,
@@ -298,6 +287,12 @@ client.on("ready", async (c) => {
 
       const randomStatus = status[Math.floor(Math.random() * status.length)];
       client.user.setActivity(randomStatus);
+
+      // Log Memory Usage
+      // const used = process.memoryUsage().rss / 1024 / 1024;
+      // console.log(
+      //   `[Status Update] Memory Usage: ${Math.round(used * 100) / 100} MB`
+      // );
     } catch (error) {
       console.error("Error updating status:", error);
     }
@@ -335,16 +330,16 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   const command = client.commands.get(interaction.commandName);
-  if (!command) return;
-
-  try {
-    await command.execute(interaction);
-  } catch (error) {
-    console.error(error);
-    await interaction.reply({
-      content: "There was an error while executing this command!",
-      ephemeral: true,
-    });
+  if (command) {
+    try {
+      await command.execute(interaction);
+    } catch (error) {
+      console.error(error);
+      await interaction.reply({
+        content: "There was an error while executing this command!",
+        ephemeral: true,
+      });
+    }
   }
 
   const { commandName } = interaction;
@@ -365,20 +360,17 @@ client.on("interactionCreate", async (interaction) => {
       const isBooster = boosterRole
         ? interaction.member.roles.cache.has(boosterRole.id)
         : false;
-      const record = await db.get(
-        "SELECT * FROM user_roles WHERE user_id = ?",
-        [interaction.user.id]
-      );
-      const hasPerms = isBooster || (record && record.is_temp === 1);
+      const record = await UserRole.findOne({ userId: interaction.user.id });
+      const hasPerms = isBooster || (record && record.isTemp);
 
       if (!hasPerms)
         return interaction.reply({
           content: "You must be a Server Booster to use this command.",
           ephemeral: true,
         });
-      if (record && record.role_id)
+      if (record && record.roleId)
         return interaction.reply({
-          content: "You already have a role. Use `/role`.",
+          content: "You already have a role. Use `/role edit`.",
           ephemeral: true,
         });
 
@@ -427,33 +419,38 @@ client.on("interactionCreate", async (interaction) => {
         await interaction.member.roles.add(newRole);
 
         if (record) {
-          await db.run("UPDATE user_roles SET role_id = ? WHERE user_id = ?", [
-            newRole.id,
-            interaction.user.id,
-          ]);
-        } else {
-          await db.run(
-            "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
-            [interaction.user.id, newRole.id]
+          await UserRole.updateOne(
+            { userId: interaction.user.id },
+            { roleId: newRole.id }
           );
+        } else {
+          await UserRole.create({
+            userId: interaction.user.id,
+            roleId: newRole.id,
+          });
         }
 
         let msg = `Role ${newRole} created!`;
         if (colorResult.warning) msg += ` (${colorResult.warning})`;
 
         await interaction.editReply(msg);
-        logAction(
-          interaction.guild,
-          `✅ **Role Created**: ${interaction.user} created **${name}**`
+        // logAction(
+        //   interaction.guild,
+        //   `✅ **Role Created**: ${interaction.user} created **${name}**`
+        // );
+        logInfo(
+          `✅ **Role Created**: ${interaction.user} created **${name}** in ${interaction.guild.name}`
         );
       } catch (e) {
-        await interaction.editReply(`Error: ${e.message}`);
+        const friendyError = formatDiscordError(e);
+        await interaction.editReply(`Error: ${friendyError}`);
+        logError(e, `Role Create - ${interaction.user.tag}`);
       }
     } else if (subcommand === "edit") {
       // Cooldown Check
       const lastUsed = cooldowns.get(interaction.user.id);
-      if (lastUsed && Date.now() - lastUsed < 30000) {
-        const remaining = (30 - (Date.now() - lastUsed) / 1000).toFixed(1);
+      if (lastUsed && Date.now() - lastUsed < 60000) {
+        const remaining = (60 - (Date.now() - lastUsed) / 1000).toFixed(1);
         return interaction.reply({
           content: `Please wait ${remaining}s.`,
           ephemeral: true,
@@ -461,17 +458,14 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       // Database Check
-      const record = await db.get(
-        "SELECT role_id FROM user_roles WHERE user_id = ?",
-        [interaction.user.id]
-      );
-      if (!record || !record.role_id)
+      const record = await UserRole.findOne({ userId: interaction.user.id });
+      if (!record || !record.roleId)
         return interaction.reply({
           content: "No custom role found.",
           ephemeral: true,
         });
 
-      const role = interaction.guild.roles.cache.get(record.role_id);
+      const role = interaction.guild.roles.cache.get(record.roleId);
       if (!role)
         return interaction.reply({
           content: "Role not found.",
@@ -493,21 +487,22 @@ client.on("interactionCreate", async (interaction) => {
 
       await interaction.deferReply();
       const changes = [];
+      let activeChanges = 0;
+      let replyMsg = "Role updated!";
 
       try {
         // Apply Changes
         if (newName) {
           await role.setName(newName);
-          changes.push(`Name: ${newName}`);
+          changes.push(`Name: **${newName}**`);
+          activeChanges++;
+          replyMsg = `You have changed your name to **${newName}**`;
         }
 
         // Color Logic
         if (newColor || newSecondary) {
           const primaryToUse = newColor || role.hexColor;
-          const secondaryToUse = newSecondary; // If null, api handles it or we might need to fetch existing
-
-          // Note: We don't fetch existing secondary because Discord API doesn't expose it easily yet
-          // User must provide both if they want to change the gradient scheme significantly.
+          const secondaryToUse = newSecondary;
 
           const result = await updateRoleColors(
             interaction.guild.id,
@@ -516,11 +511,23 @@ client.on("interactionCreate", async (interaction) => {
             secondaryToUse
           );
 
-          if (result.warning) changes.push(`Color: ${primaryToUse} (Solid)`);
-          else
+          if (result.warning) {
             changes.push(
-              newSecondary ? `Color: Gradient` : `Color: ${primaryToUse}`
+              `Color: **${primaryToUse}** (Solid - ${result.warning})`
             );
+          } else {
+            changes.push(
+              newSecondary
+                ? `Color: Gradient (**${primaryToUse}** & **${secondaryToUse}**)`
+                : `Color: **${primaryToUse}**`
+            );
+          }
+          activeChanges++;
+          replyMsg = `You have updated your role color to **${
+            secondaryToUse
+              ? `${primaryToUse} & ${secondaryToUse}`
+              : primaryToUse
+          }**`;
         }
 
         if (newIcon) {
@@ -529,20 +536,93 @@ client.on("interactionCreate", async (interaction) => {
             return interaction.editReply(`Icon Error: ${check.error}`);
 
           await role.setIcon(newIcon.url);
-          changes.push("Icon updated");
+          changes.push("Role icon updated");
+          activeChanges++;
+        }
+
+        if (activeChanges > 1) {
+          replyMsg = "Role updated!";
         }
 
         cooldowns.set(interaction.user.id, Date.now());
-        await interaction.editReply("Role updated!");
-        logAction(
-          interaction.guild,
-          `<:edit:1459490116585390156> **Role Edited**: ${
-            interaction.user
-          } - ${changes.join(", ")}`
-        );
+        await interaction.editReply(replyMsg);
+
+        if (activeChanges > 0) {
+          logInfo(
+            `<:edit:1459490116585390156> **Role Edited**: ${
+              interaction.user
+            } edited their role:\n- ${changes.join("\n- ")}`
+          );
+        }
       } catch (e) {
-        await interaction.editReply(`Error: ${e.message}`);
+        await interaction.editReply(`Error: ${formatDiscordError(e)}`);
+        logError(e, `Role Edit - ${interaction.user.tag}`);
       }
+    }
+
+    // --- COMMAND: DELETE ROLE ---
+  } else if (commandName === "delete_role") {
+    // 1. Permission Check
+    if (
+      !interaction.member.permissions.has(PermissionFlagsBits.Administrator) &&
+      !interaction.member.permissions.has(PermissionFlagsBits.ManageGuild) &&
+      !interaction.member.permissions.has(PermissionFlagsBits.ManageRoles)
+    ) {
+      return interaction.reply({
+        content:
+          "<:alert:1435556816267247738> You do not have permission to use this command.",
+        ephemeral: true,
+      });
+    }
+
+    const targetUser = interaction.options.getUser("user");
+    const record = await UserRole.findOne({ userId: targetUser.id });
+
+    if (!record || !record.roleId) {
+      return interaction.reply({
+        content: `<a:crossmark:1461047109536055594> **${targetUser.tag}** does not have a custom role.`,
+        ephemeral: true,
+      });
+    }
+
+    await interaction.deferReply();
+
+    try {
+      const role = interaction.guild.roles.cache.get(record.roleId);
+      let roleName = "Unknown Role";
+
+      if (role) {
+        roleName = role.name;
+        if (role.editable) {
+          await role.delete(
+            `${interaction.user.tag} has deleted a custom role`
+          );
+        } else {
+          // We can still delete the DB record if the role is gone or uneditable, but let's warn
+          await interaction.followUp({
+            content:
+              "⚠️ I could not delete the role from Discord (missing permissions?), but I will remove the database record.",
+            ephemeral: true,
+          });
+        }
+      }
+
+      await UserRole.deleteOne({ userId: targetUser.id });
+
+      const embed = new EmbedBuilder()
+        .setDescription(
+          `<a:checkmark:1461047015050973245> Deleted role **${roleName}** and data for ${targetUser}.`
+        )
+        .setColor(0x57f287);
+
+      await interaction.editReply({ content: null, embeds: [embed] });
+      logInfo(
+        `🗑️ **Role Deleted**: ${interaction.user} deleted role **${roleName}** belonging to ${targetUser}`
+      );
+    } catch (e) {
+      console.error("Role Delete Error:", e);
+      await interaction.editReply(`Error: ${e.message}`);
+      logError(e, `Role Delete - ${interaction.user.tag}`);
     }
   }
   // --- COMMAND: GRANT EXCEPTION ---
@@ -554,31 +634,41 @@ client.on("interactionCreate", async (interaction) => {
     if (!parsed) {
       return interaction.reply({
         content:
-          "<:close:1435556235691954216> Invalid duration. Use: 1m, 1h, 1d, 1w, 1mon, 1y",
+          "<a:crossmark:1461047109536055594> Invalid duration. Use: 1m, 1h, 1d, 1w, 1mon, 1y",
         ephemeral: true,
       });
     }
 
     const expiry = Date.now() + parsed.ms;
+
+    // Defer to prevent timeout
+    await interaction.deferReply();
+
     try {
-      await db.run(
-        `INSERT INTO user_roles(user_id, role_id, is_temp, expiry_date) 
-        VALUES (?, NULL, 1, ?)
-        ON CONFLICT(user_id)
-        DO UPDATE SET is_temp = 1, expiry_date = ?`,
-        [targetUser.id, expiry, expiry]
+      await UserRole.updateOne(
+        { userId: targetUser.id },
+        {
+          $set: { isTemp: true, expiryDate: expiry },
+          $setOnInsert: { roleId: null },
+        },
+        { upsert: true }
       );
 
-      await interaction.reply(
-        `Exception granted to ${targetUser} for **${durationInput}**`
+      await interaction.editReply(
+        `Exception granted to ${targetUser} for **${parsed.text}**`
       );
     } catch (err) {
       console.error("Grant exception failed", err);
-      await interaction.reply({
+      // If we deferred, we must editQuery
+      await interaction.editReply({
         content: "Failed to grant exception.",
-        ephemeral: true,
       });
     }
+
+    logInfo(
+      `🛡️ **Exception Granted**: ${interaction.user} granted exception to ${targetUser} for **${parsed.text}**`
+    );
+
     // logAction(
     //   interaction.guild,
     //   `🛡️ **Exception**: Admin granted permission to ${targetUser}`
@@ -593,7 +683,7 @@ client.on("interactionCreate", async (interaction) => {
     if (!targetRole.editable) {
       return interaction.reply({
         content:
-          "<:close:1435556235691954216> I cannot assign this role due to role hierarchy or permissions.",
+          "<a:crossmark:1461047109536055594> I cannot assign this role due to role hierarchy or permissions.",
         ephemeral: true,
       });
     }
@@ -608,32 +698,36 @@ client.on("interactionCreate", async (interaction) => {
     try {
       await targetUser.roles.add(targetRole);
 
-      await db.run(
-        `
-  INSERT INTO user_roles (user_id, role_id, is_temp, expiry_date)
-  VALUES (?, ?, 1, NULL)
-  ON CONFLICT(user_id)
-  DO UPDATE SET role_id = ?, is_temp = 1, expiry_date = NULL
-  `,
-        [targetUser.id, targetRole.id, targetRole.id]
+      await UserRole.updateOne(
+        { userId: targetUser.id },
+        {
+          roleId: targetRole.id,
+          isTemp: false,
+          expiryDate: null,
+        },
+        { upsert: true }
       );
 
       const embed = new EmbedBuilder()
         .setColor(0x57f287) // Discord green
         .setDescription(
-          `<a:correct:1459492234834739368> Assigned ${targetRole} to ${targetUser} (booster role).`
+          `<a:checkmark:1461047015050973245> Assigned ${targetRole} to ${targetUser} (booster role).`
         );
 
       await interaction.reply({
         embeds: [embed],
         allowedMentions: { parse: [] },
       });
+
+      logInfo(
+        `🛡️ **Role Assigned**: ${interaction.user} assigned ${targetRole.id} to ${targetUser}`
+      );
     } catch (e) {
       console.error("Assign role error:", e);
 
       if (!interaction.replied) {
         await interaction.reply(
-          `<:close:1435556235691954216> Failed to assign ${targetRole} to ${targetUser}.`
+          `<a:crossmark:1461047109536055594> Failed to assign ${targetRole} to ${targetUser}.`
         );
       }
     }
@@ -643,57 +737,57 @@ client.on("interactionCreate", async (interaction) => {
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   const wasBooster = !!oldMember.premiumSince;
   const isBooster = !!newMember.premiumSince;
- 
-   if (wasBooster === isBooster) return;
+
+  if (wasBooster === isBooster) return;
   //  User STARTED (or resumed) boosting
 
-   try {
-   if (!wasBooster && isBooster) {
-      await db.run(
-        "UPDATE user_roles SET expiry_date = NULL WHERE user_id = ? AND is_temp = 1",
-        [newMember.id]
+  try {
+    if (!wasBooster && isBooster) {
+      await UserRole.updateOne(
+        { userId: newMember.id, isTemp: true },
+        { expiryDate: null, isTemp: false }
       );
       return;
     }
 
     // User stopped boosting
     if (wasBooster && !isBooster) {
-    
-      const record = await db.get(
-        "SELECT * FROM user_roles WHERE user_id = ?",
-        [newMember.id]
-      );
+      const record = await UserRole.findOne({ userId: newMember.id });
 
       // No record → nothing to do
       if (!record) return;
 
-      
-      if (record.is_temp === 1) {
-        await db.run(
-          "UPDATE user_roles SET expiry_date = ? WHERE user_id = ? AND is_temp = 1",
-          [Date.now() + 24 * 60 * 60 * 1000, newMember.id]
+      if (!record.isTemp) {
+        await UserRole.updateOne(
+          { userId: newMember.id },
+          {
+            isTemp: true,
+            expiryDate: Date.now() + 24 * 60 * 60 * 1000,
+          }
         );
         return;
       }
     }
-    } catch (error) {
-      console.error("Error handling boost state change:", error);
-    }
+  } catch (error) {
+    console.error("Error handling boost state change:", error);
+  }
 });
+// --- BACKGROUND TASK ---
 // --- BACKGROUND TASK ---
 async function checkExpiredRoles() {
   try {
     console.log("Running expiry sweep at", new Date().toISOString());
     const now = Date.now();
-    const expired = await db.all(
-      "SELECT * FROM user_roles WHERE is_temp = 1 AND expiry_date < ?",
-      [now]
-    );
+    const expired = await UserRole.find({
+      isTemp: true,
+      expiryDate: { $lt: now },
+    });
 
-     if (!expired.length) {
+    if (!expired.length) {
       console.log("Expiry sweep ran — nothing expired");
       return;
     }
+    // const GUILD_ID = process.env.NEXUS_SERVER;
     // const GUILD_ID = process.env.NEXUS_SERVER;
     const guild = client.guilds.cache.get(process.env.NEXUS_SERVER);
     if (!guild) {
@@ -703,37 +797,41 @@ async function checkExpiredRoles() {
     for (const row of expired) {
       try {
         // SAFETY: If user is boosting again, cancel expiry
-        const member = await guild.members.fetch(row.user_id).catch(() => null);
+        const member = await guild.members.fetch(row.userId).catch(() => null);
         if (member?.premiumSince) {
-          await db.run(
-            "UPDATE user_roles SET expiry_date = NULL WHERE user_id = ?",
-            [row.user_id]
+          await UserRole.updateOne(
+            { userId: row.userId },
+            { expiryDate: null, isTemp: false }
           );
           continue;
         }
 
         // Role may not exist (exception-only)
-        if (row.role_id) {
-          const role = guild.roles.cache.get(row.role_id);
+        if (row.roleId) {
+          const role = guild.roles.cache.get(row.roleId);
 
           if (role) {
             if (!role.editable) {
               console.warn(
-                `Cannot delete expired role ${row.role_id} (permission issue)`
+                `Cannot delete expired role ${row.roleId} (permission issue)`
               );
               continue;
             }
             await role.delete("Temporary role expired");
+            logInfo(
+              `🗑️ **Role Expired**: Role **${role.name}** for user <@${row.userId}> has expired and was deleted.`
+            );
           }
+        } else {
+          logInfo(
+            `🗑️ **Role Expired**: Expired record for user <@${row.userId}> removed (Role was already gone).`
+          );
         }
 
-        await db.run(
-          "DELETE FROM user_roles WHERE user_id = ?",
-          [row.user_id]
-        );
+        await UserRole.deleteOne({ userId: row.userId });
       } catch (innerErr) {
         console.error(
-          `Error processing expired role for user ${row.user_id}:`,
+          `Error processing expired role for user ${row.userId}:`,
           innerErr
         );
       }
@@ -745,7 +843,7 @@ async function checkExpiredRoles() {
     console.error("Expired role sweep error:", err);
   }
 }
-setInterval(checkExpiredRoles,6 * 60 * 60 * 1000);
+setInterval(checkExpiredRoles, 12 * 60 * 60 * 1000);
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
@@ -756,7 +854,6 @@ client.on("messageCreate", async (message) => {
 
     // --- SEARCH COMMAND ---
     if (commandName === "search" || commandName === "find") {
-      // Define search constants
       const SEARCH_CHANNEL_ID = String(process.env.SEARCH_CHANNEL_ID).trim();
       const SIMILARITY_THRESHOLD = 0.4;
       // A. Guild Check - MUST be first for this command
@@ -786,27 +883,28 @@ client.on("messageCreate", async (message) => {
 
         const currentData = await fetchAllForumPosts(message.guild);
 
-        // Update our local reference to the global cache
-        forumCache = currentData;
-        if (!forumCache || forumCache.length === 0) {
+        if (!currentData || currentData.length === 0) {
           return searchMsg.edit(
             `<:close:1435556235691954216> No forum posts found in this server.`
           );
         }
+
         const normalizedQuery = query.toLowerCase();
         let exactMatch = null;
         let suggestions = [];
-        const seenIds = new Set(); //Prevents duplicates
-        for (const post of forumCache) {
+
+        for (const post of currentData) {
           if (!post.name) continue;
 
           const normalizedPostName = post.name.toLowerCase().trim();
+
+          // 1. Exact Match
           if (normalizedPostName === normalizedQuery) {
             exactMatch = post;
             break;
           }
-          // Use cached data
-          if (seenIds.has(post.id)) continue;
+
+          // 2. Starts With
           if (normalizedPostName.startsWith(normalizedQuery)) {
             suggestions.push({
               thread: post,
@@ -814,40 +912,33 @@ client.on("messageCreate", async (message) => {
                 0.9 +
                 (normalizedQuery.length / normalizedPostName.length) * 0.1,
             });
-            seenIds.add(post.id);
             continue;
           }
+
+          // 3. Includes
           if (normalizedPostName.includes(normalizedQuery)) {
             suggestions.push({
               thread: post,
               score:
-                0.5 +
-                (normalizedQuery.length / normalizedPostName.length) * 0.4,
+                0.7 +
+                (normalizedQuery.length / normalizedPostName.length) * 0.2,
             });
-            seenIds.add(post.id);
-            continue; // skip fuzzy
+            continue;
           }
-          if (suggestions.length < 10) {
-            const queryWords = normalizedQuery.split(/\s+/);
-            const postWords = normalizedPostName.split(/\s+/);
-            const hasCommonWord = queryWords.some((word) =>
-              postWords.includes(word)
-            );
-            if (hasCommonWord) {
-              const similarityScore = simpleSimilarity(
-                normalizedPostName,
-                normalizedQuery
-              );
-              if (similarityScore > SIMILARITY_THRESHOLD) {
-                suggestions.push({
-                  thread: post,
-                  score: similarityScore * 0.5,
-                });
-                seenIds.add(post.id);
-              }
-            }
+
+          // 4. Fuzzy Similarity
+          const similarityScore = stringSimilarity.compareTwoStrings(
+            normalizedPostName,
+            normalizedQuery
+          );
+          if (similarityScore > SIMILARITY_THRESHOLD) {
+            suggestions.push({
+              thread: post,
+              score: similarityScore * 0.6,
+            });
           }
         }
+
         if (exactMatch) {
           const forumChannelName = exactMatch.parentName || "Unknown Forum";
           return searchMsg.edit({
@@ -855,7 +946,7 @@ client.on("messageCreate", async (message) => {
             embeds: [
               new EmbedBuilder()
                 .setColor(0x00ff00)
-                .setTitle(`<a:correct:1459492234834739368> ${exactMatch.name}`)
+                .setTitle(`<a:checkmark:1461047015050973245> ${exactMatch.name}`)
                 .setURL(exactMatch.url)
                 .setDescription(`Found in **${forumChannelName}**`),
             ],
@@ -884,7 +975,7 @@ client.on("messageCreate", async (message) => {
                   `<:alert:1435556816267247738> No exact match for "${query}"`
                 )
                 .setDescription(`Did you mean:\n\n${list}`)
-                .setFooter({ text: `Searched ${forumCache.length} epubs` }),
+                .setFooter({ text: `Searched ${currentData.length} epubs` }),
             ],
           });
         }
@@ -898,8 +989,7 @@ client.on("messageCreate", async (message) => {
           "<:close:1435556235691954216> An error occurred while searching for epub"
         );
       }
-    }
-    if (commandName === "refresh" || commandName === "cache") {
+    } else if (commandName === "refresh" || commandName === "cache") {
       const isAdmin = message.member.permissions.has("Administrator");
       const hasRole = message.member.roles.cache.has("1366687926330851418");
       if (!isAdmin && !hasRole) {

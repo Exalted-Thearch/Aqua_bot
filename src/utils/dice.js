@@ -27,43 +27,53 @@ function parseDice(input) {
   return { count, sides, mode, modifier };
 }
 
-
 function rollDice(parsed) {
-  let rolls = [];
-  if (parsed.mode) {
-    const r1 = Math.floor(Math.random() * parsed.sides) + 1;
-    const r2 = Math.floor(Math.random() * parsed.sides) + 1;
-    rolls = [r1, r2];
-  } else {
-    for (let i = 0; i < parsed.count; i++) {
-      rolls.push(Math.floor(Math.random() * parsed.sides) + 1);
-    }
-  }
-  let chosen;
-  if (parsed.mode === "adv") chosen = Math.max(...rolls);
-  else if (parsed.mode === "dis") chosen = Math.min(...rolls);
-  else chosen = rolls.reduce((a, b) => a + b, 0);
+  const { count, sides, mode, modifier } = parsed;
+  const rolls = [];
 
-  const total = chosen + parsed.modifier;
-  return { rolls, chosen, total };
+  if (mode) {
+    // advantage / disadvantage (1d only)
+    const a = Math.floor(Math.random() * sides) + 1;
+    const b = Math.floor(Math.random() * sides) + 1;
+    rolls.push(a, b);
+
+    const chosen = mode === "adv" ? Math.max(a, b) : Math.min(a, b);
+    const total = chosen + modifier;
+
+    return {
+      rolls,
+      chosen,
+      total
+    };
+  }
+
+  // NORMAL rolls
+  for (let i = 0; i < count; i++) {
+    rolls.push(Math.floor(Math.random() * sides) + 1);
+  }
+
+  const total = rolls.reduce((a, b) => a + b, 0) + modifier;
+
+  return { rolls, total };
 }
+
 function wrapRolls(rolls, maxWidth = 38) {
   const lines = [];
   let current = "";
 
   for (const roll of rolls) {
-    const part = String(roll);
+    const part = String(roll) + ", ";
 
     if ((current + part).length > maxWidth) {
-      lines.push(current.trim());
-      current = part + " ";
+      lines.push(current.replace(/, $/, ""));
+      current = part;
     } else {
-      current += part + " ";
+      current += part;
     }
   }
 
   if (current.trim()) {
-    lines.push(current.trim());
+    lines.push(current.replace(/, $/, ""));
   }
 
   return lines;
@@ -71,18 +81,18 @@ function wrapRolls(rolls, maxWidth = 38) {
 
 function largeDiceTable(parsed, result) {
   const headerParts = [
-  `${parsed.count}d${parsed.sides}`,
-  parsed.mode ? parsed.mode : null,
-  parsed.modifier !== 0
-    ? `${parsed.modifier > 0 ? "+" : ""}${parsed.modifier}`
-    : null
-];
+    `${parsed.count}d${parsed.sides}`,
+    parsed.mode ? parsed.mode : null,
+    parsed.modifier !== 0
+      ? `${parsed.modifier > 0 ? "+" : ""}${parsed.modifier}`
+      : null,
+  ];
 
-const header = headerParts.filter(Boolean).join(" ");
+  const header = headerParts.filter(Boolean).join(" ");
 
+  const ROLL_COL_WIDTH = Math.min(22, Math.max(18, parsed.count * 4));
 
-  const ROLL_COL_WIDTH = 26; // 👈 mobile friendly
-  const SUM_COL_WIDTH = 10;
+  const SUM_COL_WIDTH = 12;
 
   const rollLines = wrapRolls(result.rolls, ROLL_COL_WIDTH);
   const sumText = `[${result.total}]`;
@@ -118,18 +128,24 @@ const header = headerParts.filter(Boolean).join(" ");
 
   return table;
 }
+// function formatRolls(rolls, perLine = 5) {
+//   const lines = [];
+//   for (let i = 0; i < rolls.length; i += perLine) {
+//     lines.push(rolls.slice(i, i + perLine).join(", "));
+//   }
+//   return lines;
+// }
 
 function smallDiceTable(parsed, result) {
   const headerParts = [
-  `${parsed.count}d${parsed.sides}`,
-  parsed.mode ? parsed.mode : null,
-  parsed.modifier !== 0
-    ? `${parsed.modifier > 0 ? "+" : ""}${parsed.modifier}`
-    : null
-];
+    `${parsed.count}d${parsed.sides}`,
+    parsed.mode ? parsed.mode : null,
+    parsed.modifier !== 0
+      ? `${parsed.modifier > 0 ? "+" : ""}${parsed.modifier}`
+      : null,
+  ];
 
-const header = headerParts.filter(Boolean).join(" ");
-
+  const header = headerParts.filter(Boolean).join(" ");
 
   return `╔════════════════════╗
 ║${center(header, 20)}║

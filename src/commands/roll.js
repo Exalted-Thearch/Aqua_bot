@@ -49,7 +49,7 @@ module.exports = {
     const result = rollDice(parsed);
 
     const table =
-      parsed.count <= 5
+      parsed.count <= 3
         ? smallDiceTable(parsed, result)
         : largeDiceTable(parsed, result);
     await interaction.reply({

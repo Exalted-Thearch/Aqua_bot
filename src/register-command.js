@@ -59,6 +59,17 @@ const nexusCommands = [
           o.setName("icon").setDescription("New Icon")
         )
     ),
+  new SlashCommandBuilder()
+    .setName("delete_role")
+    .setDescription("Delete a user's custom role and data record")
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator ||
+        PermissionFlagsBits.ManageGuild ||
+        PermissionFlagsBits.ManageRoles
+    )
+    .addUserOption((o) =>
+      o.setName("user").setDescription("The user").setRequired(true)
+    ),
 
   new SlashCommandBuilder()
     .setName("grant_exception")
@@ -80,7 +91,7 @@ const nexusCommands = [
 
   new SlashCommandBuilder()
     .setName("assign_role")
-    .setDescription("Admin: Assign an existing role to a user")
+    .setDescription("Mod: Assign an existing role to a user")
     .setDefaultMemberPermissions(
       PermissionFlagsBits.Administrator ||
         PermissionFlagsBits.ManageGuild ||
@@ -94,20 +105,21 @@ const nexusCommands = [
     ),
   new SlashCommandBuilder()
     .setName("ping")
-    .setDescription("Replies with pong!"),
+    .setDescription("Check the websocket latency"),
 
-    new SlashCommandBuilder()
+  new SlashCommandBuilder()
     .setName("roll")
     .setDescription("Roll a dice (e.g. 1d20, 2d6)")
     .addStringOption((o) =>
-      o.setName("dice").setDescription("Dice notation (e.g. 1d20)")
-      .setRequired(true)),
-]
-  // IMPORTANT: Convert these builders to JSON for the API
-  .map((command) => command.toJSON());
+      o
+        .setName("dice")
+        .setDescription("Dice notation (e.g. 1d20)")
+        .setRequired(true)
+    ),
+].map((command) => command.toJSON());
 
 // 3. Load File-Based Commands (General) - Intended for Grimoire?
-const generalCommands = []; 
+const generalCommands = [];
 const commandsPath = path.join(__dirname, "commands");
 
 // Check if folder exists to prevent crash
