@@ -3,7 +3,7 @@ const {
   rollDice,
   largeDiceTable,
   smallDiceTable,
-} = require("../utils/dice");
+} = require("../../utils/dice");
 const { SlashCommandBuilder } = require("discord.js");
 
 module.exports = {
@@ -11,7 +11,7 @@ module.exports = {
     .setName("roll")
     .setDescription("Roll dice like 1d20, 1d20+5 adv")
     .addStringOption((option) =>
-      option.setName("dice").setDescription("Dice notation").setRequired(true)
+      option.setName("dice").setDescription("Dice notation").setRequired(true),
     ),
 
   async execute(interaction) {
@@ -49,9 +49,9 @@ module.exports = {
     const result = rollDice(parsed);
 
     const table =
-      parsed.count <= 3
-        ? smallDiceTable(parsed, result)
-        : largeDiceTable(parsed, result);
+      parsed.count <= 3 ?
+        smallDiceTable(parsed, result)
+      : largeDiceTable(parsed, result);
     await interaction.reply({
       content: "```text\n" + table + "\n```",
       allowedMentions: { parse: [] },

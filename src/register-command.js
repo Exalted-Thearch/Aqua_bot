@@ -21,133 +21,58 @@ if (!token || !clientId || !testServerId || !nexusServerId) {
   process.exit(1);
 }
 
-// 2. Define Hardcoded Commands (Role Management) - Intended for Nexus
-const nexusCommands = [
-  new SlashCommandBuilder()
-    .setName("role")
-    .setDescription("Manage your custom role")
-    // Subcommand: "/role create"
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("create")
-        .setDescription("Create your custom role (Booster only)")
-        .addStringOption((o) =>
-          o.setName("name").setDescription("Name").setRequired(true)
-        )
-        .addStringOption((o) =>
-          o.setName("hex_color").setDescription("Hex color").setRequired(true)
-        )
-        .addStringOption((o) =>
-          o
-            .setName("secondary_hex")
-            .setDescription("Secondary hex for Gradient Color")
-        )
-    )
-    // Subcommand: "/role edit"
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("edit")
-        .setDescription("Edit your custom role details")
-        .addStringOption((o) => o.setName("name").setDescription("New Name"))
-        .addStringOption((o) =>
-          o.setName("hex_color").setDescription("New Color")
-        )
-        .addStringOption((o) =>
-          o.setName("secondary_hex").setDescription("New Gradient")
-        )
-        .addAttachmentOption((o) =>
-          o.setName("icon").setDescription("New Icon")
-        )
-    ),
-  new SlashCommandBuilder()
-    .setName("delete_role")
-    .setDescription("Delete a user's custom role and data record")
-    .setDefaultMemberPermissions(
-      PermissionFlagsBits.Administrator ||
-        PermissionFlagsBits.ManageGuild ||
-        PermissionFlagsBits.ManageRoles
-    )
-    .addUserOption((o) =>
-      o.setName("user").setDescription("The user").setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("grant_exception")
-    .setDescription(
-      "Admin: Allow non-booster to create a role for certain time"
-    )
-    .setDefaultMemberPermissions(
-      PermissionFlagsBits.Administrator || PermissionFlagsBits.ManageGuild
-    )
-    .addUserOption((o) =>
-      o.setName("user").setDescription("The user").setRequired(true)
-    )
-    .addStringOption((o) =>
-      o
-        .setName("duration")
-        .setDescription("You can use 1min, 1h, 1d, 1w, 1mon, 1y")
-        .setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("assign_role")
-    .setDescription("Mod: Assign an existing role to a user")
-    .setDefaultMemberPermissions(
-      PermissionFlagsBits.Administrator ||
-        PermissionFlagsBits.ManageGuild ||
-        PermissionFlagsBits.ManageRoles
-    )
-    .addUserOption((o) =>
-      o.setName("user").setDescription("The user").setRequired(true)
-    )
-    .addRoleOption((o) =>
-      o.setName("role").setDescription("The role to assign").setRequired(true)
-    ),
-  new SlashCommandBuilder()
-    .setName("ping")
-    .setDescription("Check the websocket latency"),
-
-  new SlashCommandBuilder()
-    .setName("roll")
-    .setDescription("Roll a dice (e.g. 1d20, 2d6)")
-    .addStringOption((o) =>
-      o
-        .setName("dice")
-        .setDescription("Dice notation (e.g. 1d20)")
-        .setRequired(true)
-    ),
-].map((command) => command.toJSON());
-
-// 3. Load File-Based Commands (General) - Intended for Grimoire?
+// 2. Load Commands Dynamically
+const nexusCommands = [];
 const generalCommands = [];
 const commandsPath = path.join(__dirname, "commands");
 
-// Check if folder exists to prevent crash
 if (fs.existsSync(commandsPath)) {
   const commandFolders = fs.readdirSync(commandsPath);
 
   for (const folder of commandFolders) {
     const folderPath = path.join(commandsPath, folder);
-    // Ensure it is a directory before reading
     if (fs.lstatSync(folderPath).isDirectory()) {
       const commandFiles = fs
         .readdirSync(folderPath)
         .filter((file) => file.endsWith(".js"));
+
       for (const file of commandFiles) {
         const filePath = path.join(folderPath, file);
         const command = require(filePath);
+
         if ("data" in command && "execute" in command) {
-          generalCommands.push(command.data.toJSON());
-          console.log(`[INFO] Loaded command from ${filePath}`);
+          if (folder === "roles") {
+            nexusCommands.push(command.data.toJSON());
+          } else {
+            generalCommands.push(command.data.toJSON());
+          }
+
+          // SPECIAL CASE: 'roll' command should also go to Nexus
+          if (command.data.name === "roll") {
+            nexusCommands.push(command.data.toJSON());
+          }
+
+          console.log(
+            `[INFO] Loaded command ${command.data.name} from ${folder}/${file}`,
+          );
         } else {
           console.log(
-            `[WARNING] The command at ${filePath} is missing "data" or "execute".`
+            `[WARNING] The command at ${filePath} is missing "data" or "execute".`,
           );
         }
       }
     }
   }
 }
+// Add hardcoded roll command if it doesn't exist in files yet (keeping it for safety if user wants it)
+// But I think 'roll' was hardcoded too. I should probably create a file for it or keep it hardcoded in generalCommands?
+// For now, I will omit 'roll' hardcoding as per instruction "replace hardcoded commands".
+// If 'roll' is lost, I should recreate it as a file.
+// The user prompt only mentioned role commands refactoring.
+// I will ensure 'roll' is preserved if I didn't create a file for it.
+// Wait, 'roll' command was there.
+// I should check if I should create 'roll.js'.
+// I'll create 'roll.js' in utility first to be safe.
 
 // 4. Deploy Logic
 const rest = new REST().setToken(token);
@@ -159,7 +84,7 @@ const rest = new REST().setToken(token);
     // --- A. Register to NEXUS (Role Commands Only) ---
     if (nexusServerId) {
       console.log(
-        `Registering ${nexusCommands.length} commands to Nexus Server...`
+        `Registering ${nexusCommands.length} commands to Nexus Server...`,
       );
       await rest.put(Routes.applicationGuildCommands(clientId, nexusServerId), {
         body: nexusCommands,
@@ -169,20 +94,24 @@ const rest = new REST().setToken(token);
     // --- B. Register to GRIMOIRE (File Commands Only) ---
     if (grimoireServerId && generalCommands.length > 0) {
       console.log(
-        `Registering ${generalCommands.length} commands to Grimoire Server...`
+        `Registering ${generalCommands.length} commands to Grimoire Server...`,
       );
       await rest.put(
         Routes.applicationGuildCommands(clientId, grimoireServerId),
-        { body: generalCommands }
+        { body: generalCommands },
       );
     }
 
     // --- C. Register to TEST SERVER (Everything) ---
-    // We combine the arrays here using spread syntax
-    const allTestCommands = [...nexusCommands, ...generalCommands];
+    // We combine the arrays here using spread syntax and deduplicate by name
+    const allTestCommands = [
+      ...new Map(
+        [...nexusCommands, ...generalCommands].map((c) => [c.name, c]),
+      ).values(),
+    ];
 
     console.log(
-      `Registering ALL ${allTestCommands.length} commands to Test Server...`
+      `Registering ALL ${allTestCommands.length} commands to Test Server...`,
     );
     await rest.put(Routes.applicationGuildCommands(clientId, testServerId), {
       body: allTestCommands,

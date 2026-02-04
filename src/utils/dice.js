@@ -27,14 +27,16 @@ function parseDice(input) {
   return { count, sides, mode, modifier };
 }
 
+const crypto = require("crypto");
+
 function rollDice(parsed) {
   const { count, sides, mode, modifier } = parsed;
   const rolls = [];
 
   if (mode) {
     // advantage / disadvantage (1d only)
-    const a = Math.floor(Math.random() * sides) + 1;
-    const b = Math.floor(Math.random() * sides) + 1;
+    const a = crypto.randomInt(1, sides + 1);
+    const b = crypto.randomInt(1, sides + 1);
     rolls.push(a, b);
 
     const chosen = mode === "adv" ? Math.max(a, b) : Math.min(a, b);
@@ -43,13 +45,13 @@ function rollDice(parsed) {
     return {
       rolls,
       chosen,
-      total
+      total,
     };
   }
 
   // NORMAL rolls
   for (let i = 0; i < count; i++) {
-    rolls.push(Math.floor(Math.random() * sides) + 1);
+    rolls.push(crypto.randomInt(1, sides + 1));
   }
 
   const total = rolls.reduce((a, b) => a + b, 0) + modifier;
@@ -83,9 +85,9 @@ function largeDiceTable(parsed, result) {
   const headerParts = [
     `${parsed.count}d${parsed.sides}`,
     parsed.mode ? parsed.mode : null,
-    parsed.modifier !== 0
-      ? `${parsed.modifier > 0 ? "+" : ""}${parsed.modifier}`
-      : null,
+    parsed.modifier !== 0 ?
+      `${parsed.modifier > 0 ? "+" : ""}${parsed.modifier}`
+    : null,
   ];
 
   const header = headerParts.filter(Boolean).join(" ");
@@ -102,12 +104,12 @@ function largeDiceTable(parsed, result) {
   table += `╔${"═".repeat(ROLL_COL_WIDTH + 2)}╤${"═".repeat(SUM_COL_WIDTH)}╗\n`;
   table += `║${center(header, ROLL_COL_WIDTH + 2)}│${center(
     "sum",
-    SUM_COL_WIDTH
+    SUM_COL_WIDTH,
   )}║\n`;
   table += `╠${"═".repeat(ROLL_COL_WIDTH + 2)}╪${"═".repeat(SUM_COL_WIDTH)}╣\n`;
   table += `║${center("rolls", ROLL_COL_WIDTH + 2)}│${center(
     "total",
-    SUM_COL_WIDTH
+    SUM_COL_WIDTH,
   )}║\n`;
   table += `╟${"─".repeat(ROLL_COL_WIDTH + 2)}┼${"─".repeat(SUM_COL_WIDTH)}╢\n`;
 
@@ -115,11 +117,11 @@ function largeDiceTable(parsed, result) {
     if (index === 0) {
       table += `║ ${line.padEnd(ROLL_COL_WIDTH)} │${center(
         sumText,
-        SUM_COL_WIDTH
+        SUM_COL_WIDTH,
       )}║\n`;
     } else {
       table += `║ ${line.padEnd(ROLL_COL_WIDTH)} │${" ".repeat(
-        SUM_COL_WIDTH
+        SUM_COL_WIDTH,
       )}║\n`;
     }
   });
@@ -140,9 +142,9 @@ function smallDiceTable(parsed, result) {
   const headerParts = [
     `${parsed.count}d${parsed.sides}`,
     parsed.mode ? parsed.mode : null,
-    parsed.modifier !== 0
-      ? `${parsed.modifier > 0 ? "+" : ""}${parsed.modifier}`
-      : null,
+    parsed.modifier !== 0 ?
+      `${parsed.modifier > 0 ? "+" : ""}${parsed.modifier}`
+    : null,
   ];
 
   const header = headerParts.filter(Boolean).join(" ");
