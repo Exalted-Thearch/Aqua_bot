@@ -1,4 +1,8 @@
-const { SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
+const {
+  SlashCommandBuilder,
+  PermissionFlagsBits,
+  MessageFlags,
+} = require("discord.js");
 const UserRole = require("../../database/UserRole");
 const { logInfo, logError } = require("../../utils/logger");
 const { parseDuration } = require("../../utils/roleUtils");
@@ -31,7 +35,7 @@ module.exports = {
       return interaction.reply({
         content:
           "<a:crossmark:1461047109536055594> Invalid duration. Use: 1m, 1h, 1d, 1w, 1mon, 1y",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
 

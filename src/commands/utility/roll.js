@@ -4,7 +4,7 @@ const {
   largeDiceTable,
   smallDiceTable,
 } = require("../../utils/dice");
-const { SlashCommandBuilder } = require("discord.js");
+const { SlashCommandBuilder, MessageFlags } = require("discord.js");
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -21,20 +21,20 @@ module.exports = {
       return interaction.reply({
         content:
           "<:close:1435556235691954216> Invalid format. Examples: `1d20`, `1d20 adv`, `1d20+5 dis`",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
     if (parsed.count > 50) {
       return interaction.reply({
         content: "<:close:1435556235691954216> Maximum dice count is 50.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
 
     if (parsed.sides > 1000) {
       return interaction.reply({
         content: "<:close:1435556235691954216> Maximum dice sides is 1000.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
 
@@ -42,7 +42,7 @@ module.exports = {
       return interaction.reply({
         content:
           "<:close:1435556235691954216> Advantage/Disadvantage only works with 1 die.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
 

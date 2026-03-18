@@ -1,10 +1,15 @@
-const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
+const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require("discord.js");
 const { fetchAllForumPosts } = require("../../utils/forumUtils");
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("searchtag")
     .setDescription("Search forum posts by tags")
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator ||
+        PermissionFlagsBits.ManageGuild ||
+        PermissionFlagsBits.ManageMessages,
+    )
     .addStringOption((option) =>
       option
         .setName("tags")

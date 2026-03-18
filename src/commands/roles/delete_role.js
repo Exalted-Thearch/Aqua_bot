@@ -2,6 +2,7 @@ const {
   SlashCommandBuilder,
   PermissionFlagsBits,
   EmbedBuilder,
+  MessageFlags,
 } = require("discord.js");
 const UserRole = require("../../database/UserRole");
 const { logInfo, logError } = require("../../utils/logger");
@@ -29,7 +30,7 @@ module.exports = {
       return interaction.reply({
         content:
           "<:alert:1435556816267247738> You do not have permission to use this command.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
 
@@ -39,7 +40,7 @@ module.exports = {
     if (!record || !record.roleId) {
       return interaction.reply({
         content: `<a:crossmark:1461047109536055594> **${targetUser.tag}** does not have a custom role.`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
 
@@ -60,7 +61,7 @@ module.exports = {
           await interaction.followUp({
             content:
               "⚠️ I could not delete the role from Discord (missing permissions?), but I will remove the database record.",
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         }
       }

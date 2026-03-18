@@ -2,6 +2,7 @@ const {
   SlashCommandBuilder,
   PermissionFlagsBits,
   EmbedBuilder,
+  MessageFlags,
 } = require("discord.js");
 const UserRole = require("../../database/UserRole");
 const { logInfo } = require("../../utils/logger");
@@ -30,7 +31,7 @@ module.exports = {
       return interaction.reply({
         content:
           "<a:crossmark:1461047109536055594> I cannot assign this role due to role hierarchy or permissions.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
 
@@ -38,7 +39,7 @@ module.exports = {
       return interaction.reply({
         content:
           "<:alert:1435556816267247738> The roles can only be assigned to boosters.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
     try {

@@ -4,6 +4,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const connectMongo = require("./database/mongo");
 const UserRole = require("./database/UserRole");
 const { logInfo, logError } = require("./utils/logger");
+const stickyManager = require("./utils/stickyManager");
 const {
   Client,
   ActivityType,
@@ -12,6 +13,7 @@ const {
   EmbedBuilder,
   PermissionFlagsBits,
   Routes,
+  MessageFlags,
 } = require("discord.js");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -75,6 +77,7 @@ client.on("ready", async (c) => {
 
   await connectMongo();
   console.log("✅ MongoDB initialized and ready.");
+  await stickyManager.init();
 
   setInterval(async () => {
     try {
@@ -109,6 +112,19 @@ client.on("ready", async (c) => {
 });
 
 client.on("interactionCreate", async (interaction) => {
+  // Handle Modals
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId.startsWith("stickynote:")) {
+      const command = client.commands.get("stickynote");
+      if (command && command.handleModal) {
+        await command.handleModal(interaction);
+      }
+    }
+    return;
+  }
+
+  // 124
+  // 125
   // Handle Chat Input Commands (Slash Commands)
   if (!interaction.isChatInputCommand()) return;
 
@@ -120,7 +136,7 @@ client.on("interactionCreate", async (interaction) => {
       console.error(error);
       const errorMsg = {
         content: "There was an error while executing this command!",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       };
 
       try {
@@ -250,6 +266,9 @@ async function checkExpiredRoles() {
 setInterval(checkExpiredRoles, 12 * 60 * 60 * 1000);
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
+
+  // Sticky Note Logic
+  stickyManager.handleMessage(message);
 
   // --- Start Prefix Command Handling ---
   if (message.content.startsWith(prefix)) {

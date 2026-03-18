@@ -1,4 +1,12 @@
-const { SlashCommandBuilder } = require("discord.js");
+const {
+  SlashCommandBuilder,
+  MessageFlags,
+  ContainerBuilder,
+  SectionBuilder,
+  TextDisplayBuilder,
+  ThumbnailBuilder,
+  SeparatorBuilder,
+} = require("discord.js");
 const UserRole = require("../../database/UserRole");
 const { logInfo, logError } = require("../../utils/logger");
 const {
@@ -22,12 +30,15 @@ module.exports = {
           o.setName("name").setDescription("Name").setRequired(true),
         )
         .addStringOption((o) =>
-          o.setName("hex_color").setDescription("Hex color").setRequired(true),
+          o
+            .setName("primary")
+            .setDescription("Primary hex color (ex: #ffffff)")
+            .setRequired(true),
         )
         .addStringOption((o) =>
           o
-            .setName("secondary_hex")
-            .setDescription("Secondary hex for Gradient Color"),
+            .setName("secondary")
+            .setDescription("Secondary hex for Gradient Color (ex: #000000)"),
         ),
     )
     // Subcommand: "/role edit"
@@ -37,13 +48,22 @@ module.exports = {
         .setDescription("Edit your custom role details")
         .addStringOption((o) => o.setName("name").setDescription("New Name"))
         .addStringOption((o) =>
-          o.setName("hex_color").setDescription("New Color"),
+          o
+            .setName("primary")
+            .setDescription("New Primary Color (ex: #ffffff)"),
         )
         .addStringOption((o) =>
-          o.setName("secondary_hex").setDescription("New Gradient"),
+          o
+            .setName("secondary")
+            .setDescription("New Secondary Color (ex: #000000)"),
         )
         .addAttachmentOption((o) =>
-          o.setName("icon").setDescription("New Icon"),
+          o.setName("image").setDescription("New Role Icon (Image)"),
+        )
+        .addStringOption((o) =>
+          o
+            .setName("emoji")
+            .setDescription("New Role Icon (Emoji) [Image takes priority]"),
         ),
     ),
 
@@ -51,8 +71,8 @@ module.exports = {
     const subcommand = interaction.options.getSubcommand();
     if (subcommand === "create") {
       const name = interaction.options.getString("name");
-      const color = interaction.options.getString("hex_color");
-      const secondary = interaction.options.getString("secondary_hex");
+      const color = interaction.options.getString("primary");
+      const secondary = interaction.options.getString("secondary");
       // 1. Auto-detect the role with the "premiumSubscriber" tag
       const boosterRole = interaction.guild.roles.cache.find(
         (role) => role.tags && role.tags.premiumSubscriberRole,
@@ -67,12 +87,12 @@ module.exports = {
       if (!hasPerms)
         return interaction.reply({
           content: "You must be a Server Booster to use this command.",
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       if (record && record.roleId)
         return interaction.reply({
           content: "You already have a role. Use `/role edit`.",
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
 
       await interaction.deferReply();
@@ -105,14 +125,14 @@ module.exports = {
             console.error("Positioning Error:", err);
             await interaction.followUp({
               content: `⚠️ **Warning:** Role created, but I could not move it above the Booster role. \n**Fix:** Go to Server Settings -> Roles and drag my Bot Role higher than the Booster Role!`,
-              ephemeral: true,
+              flags: MessageFlags.Ephemeral,
             });
           }
         } else {
           console.warn("⚠️ No Booster Role found in this server.");
           await interaction.followUp({
             content: `⚠️ **Notice:** I couldn't find a "Server Booster" role in this server (maybe nobody has boosted yet?). The role was created but not moved.`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         }
 
@@ -155,7 +175,7 @@ module.exports = {
         const remaining = (60 - (Date.now() - lastUsed) / 1000).toFixed(1);
         return interaction.reply({
           content: `Please wait ${remaining}s.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
 
@@ -164,26 +184,27 @@ module.exports = {
       if (!record || !record.roleId)
         return interaction.reply({
           content: "No custom role found.",
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
 
       const role = interaction.guild.roles.cache.get(record.roleId);
       if (!role)
         return interaction.reply({
           content: "Role not found.",
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
 
       // Get Inputs
       const newName = interaction.options.getString("name");
-      const newColor = interaction.options.getString("hex_color");
-      const newSecondary = interaction.options.getString("secondary_hex");
-      const newIcon = interaction.options.getAttachment("icon");
+      const newColor = interaction.options.getString("primary");
+      const newSecondary = interaction.options.getString("secondary");
+      const newImage = interaction.options.getAttachment("image");
+      const newEmoji = interaction.options.getString("emoji");
 
-      if (!newName && !newColor && !newIcon && !newSecondary) {
+      if (!newName && !newColor && !newImage && !newSecondary && !newEmoji) {
         return interaction.reply({
           content: "No changes provided.",
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
 
@@ -191,6 +212,7 @@ module.exports = {
       const changes = [];
       let activeChanges = 0;
       let replyMsg = "Role updated!";
+      let embed = null;
 
       try {
         // Apply Changes
@@ -198,7 +220,7 @@ module.exports = {
           await role.setName(newName);
           changes.push(`Name: **${newName}**`);
           activeChanges++;
-          replyMsg = `You have changed your name to **${newName}**`;
+          replyMsg = `✅ Your role name has been updated to **${newName}**!`;
         }
 
         // Color Logic
@@ -226,29 +248,91 @@ module.exports = {
             );
           }
           activeChanges++;
-          replyMsg = `You have updated your role color to **${
+          replyMsg = `<a:checkmark:1461047015050973245> Your role color has been updated to **${
             secondaryToUse ?
-              `${primaryToUse} & ${secondaryToUse}`
+              `${primaryToUse} & ${secondaryToUse} (Gradient)`
             : primaryToUse
-          }**`;
+          }**!`;
         }
 
-        if (newIcon) {
-          const check = await validateImage(newIcon.url);
+        if (newImage) {
+          const check = await validateImage(newImage.url);
           if (!check.valid)
-            return interaction.editReply(`Icon Error: ${check.error}`);
+            return interaction.editReply(`Image Error: ${check.error}`);
 
-          await role.setIcon(newIcon.url);
+          await role.edit({
+            icon: newImage.url,
+            unicodeEmoji: null,
+          });
           changes.push("Role icon updated");
           activeChanges++;
+          embed = new ContainerBuilder()
+            .setAccentColor(role.color || 0x55e6b0)
+            .addSectionComponents(
+              new SectionBuilder()
+                .addTextDisplayComponents(
+                  new TextDisplayBuilder().setContent(
+                    `**${interaction.user.displayName}'s Role Icon**\nYour role icon has been set to the shown image!`,
+                  ),
+                )
+                .setThumbnailAccessory(new ThumbnailBuilder().setURL(newImage.url)),
+            )
+            .addSeparatorComponents(new SeparatorBuilder())
+            .addTextDisplayComponents(
+              new TextDisplayBuilder().setContent(`-# Role: ${role.name}`),
+            );
+        } else if (newEmoji) {
+          const customEmojiMatch = newEmoji.match(/<a?:.+?:(\d+)>/);
+          if (customEmojiMatch) {
+            const emojiId = customEmojiMatch[1];
+            const emojiUrl = `https://cdn.discordapp.com/emojis/${emojiId}.png`;
+            await role.edit({
+              icon: emojiUrl,
+              unicodeEmoji: null,
+            });
+            changes.push("Role icon updated (Custom Emoji)");
+            embed = new ContainerBuilder()
+              .setAccentColor(role.color || 0x55e6b0)
+              .addSectionComponents(
+                new SectionBuilder()
+                  .addTextDisplayComponents(
+                    new TextDisplayBuilder().setContent(
+                      `**${interaction.user.displayName}'s Role Icon**\nYour role icon has been set to the shown emoji!`,
+                    ),
+                  )
+                  .setThumbnailAccessory(new ThumbnailBuilder().setURL(emojiUrl)),
+              )
+              .addSeparatorComponents(new SeparatorBuilder())
+              .addTextDisplayComponents(
+                new TextDisplayBuilder().setContent(`-# Role: ${role.name}`),
+              );
+          } else {
+            // Treat as Unicode
+            await role.edit({
+              icon: null,
+              unicodeEmoji: newEmoji,
+            });
+            changes.push(`Role icon updated (Unicode: ${newEmoji})`);
+          }
+          activeChanges++;
+          replyMsg = `<a:checkmark:1461047015050973245> Your role icon has been set to ${newEmoji}!`;
         }
 
         if (activeChanges > 1) {
-          replyMsg = "Role updated!";
+          replyMsg =
+            "<a:checkmark:1461047015050973245> Your role has been updated!";
         }
 
         cooldowns.set(interaction.user.id, Date.now());
-        await interaction.editReply(replyMsg);
+
+        if (embed && activeChanges === 1) {
+          await interaction.editReply({
+            components: [embed],
+            flags: MessageFlags.IsComponentsV2,
+          });
+        } else {
+          await interaction.editReply(replyMsg);
+        }
 
         if (activeChanges > 0) {
           logInfo(

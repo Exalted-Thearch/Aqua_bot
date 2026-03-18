@@ -22,8 +22,9 @@ if (!token || !clientId || !testServerId || !nexusServerId) {
 }
 
 // 2. Load Commands Dynamically
-const nexusCommands = [];
-const generalCommands = [];
+const nexusCommands = []; // Roles (Nexus Server)
+const generalCommands = []; // SearchTag (Grimoire Server)
+const globalCommands = []; // Utility (Global)
 const commandsPath = path.join(__dirname, "commands");
 
 if (fs.existsSync(commandsPath)) {
@@ -41,16 +42,26 @@ if (fs.existsSync(commandsPath)) {
         const command = require(filePath);
 
         if ("data" in command && "execute" in command) {
+          const commandData = command.data.toJSON();
+
           if (folder === "roles") {
-            nexusCommands.push(command.data.toJSON());
+            nexusCommands.push(commandData);
+          } else if (folder === "utility") {
+            if (file === "searchTag.js") {
+              generalCommands.push(commandData); // Grimoire only
+            } else {
+              globalCommands.push(commandData); // Global (ping, roll, stickynote)
+            }
           } else {
-            generalCommands.push(command.data.toJSON());
+            // Default behavior for other folders (if any added later)
+            // For now, let's assume they are global unless specified otherwise?
+            // Or maybe safe default is global?
+            globalCommands.push(commandData);
           }
 
-          // SPECIAL CASE: 'roll' command should also go to Nexus
-          if (command.data.name === "roll") {
-            nexusCommands.push(command.data.toJSON());
-          }
+          // SPECIAL CASE: 'roll' command check is no longer needed if roll.js exists in utility
+          // but if we are keeping the logic consistent with previous behavior...
+          // roll.js IS in utility, so it went to globalCommands above.
 
           console.log(
             `[INFO] Loaded command ${command.data.name} from ${folder}/${file}`,
@@ -64,15 +75,6 @@ if (fs.existsSync(commandsPath)) {
     }
   }
 }
-// Add hardcoded roll command if it doesn't exist in files yet (keeping it for safety if user wants it)
-// But I think 'roll' was hardcoded too. I should probably create a file for it or keep it hardcoded in generalCommands?
-// For now, I will omit 'roll' hardcoding as per instruction "replace hardcoded commands".
-// If 'roll' is lost, I should recreate it as a file.
-// The user prompt only mentioned role commands refactoring.
-// I will ensure 'roll' is preserved if I didn't create a file for it.
-// Wait, 'roll' command was there.
-// I should check if I should create 'roll.js'.
-// I'll create 'roll.js' in utility first to be safe.
 
 // 4. Deploy Logic
 const rest = new REST().setToken(token);
@@ -82,7 +84,7 @@ const rest = new REST().setToken(token);
     console.log(`Started refreshing application (/) commands.`);
 
     // --- A. Register to NEXUS (Role Commands Only) ---
-    if (nexusServerId) {
+    if (nexusServerId && nexusCommands.length > 0) {
       console.log(
         `Registering ${nexusCommands.length} commands to Nexus Server...`,
       );
@@ -91,7 +93,7 @@ const rest = new REST().setToken(token);
       });
     }
 
-    // --- B. Register to GRIMOIRE (File Commands Only) ---
+    // --- B. Register to GRIMOIRE (SearchTag Only) ---
     if (grimoireServerId && generalCommands.length > 0) {
       console.log(
         `Registering ${generalCommands.length} commands to Grimoire Server...`,
@@ -102,20 +104,33 @@ const rest = new REST().setToken(token);
       );
     }
 
-    // --- C. Register to TEST SERVER (Everything) ---
+    // --- C. Register GLOBAL Commands ---
+    if (globalCommands.length > 0) {
+      console.log(`Registering ${globalCommands.length} GLOBAL commands...`);
+      await rest.put(Routes.applicationCommands(clientId), {
+        body: globalCommands, // No guild ID needed for global
+      });
+    }
+
+    // --- D. Register to TEST SERVER (Everything) ---
     // We combine the arrays here using spread syntax and deduplicate by name
     const allTestCommands = [
       ...new Map(
-        [...nexusCommands, ...generalCommands].map((c) => [c.name, c]),
+        [...nexusCommands, ...generalCommands, ...globalCommands].map((c) => [
+          c.name,
+          c,
+        ]),
       ).values(),
     ];
 
-    console.log(
-      `Registering ALL ${allTestCommands.length} commands to Test Server...`,
-    );
-    await rest.put(Routes.applicationGuildCommands(clientId, testServerId), {
-      body: allTestCommands,
-    });
+    if (testServerId) {
+      console.log(
+        `Registering ALL ${allTestCommands.length} commands to Test Server...`,
+      );
+      await rest.put(Routes.applicationGuildCommands(clientId, testServerId), {
+        body: allTestCommands,
+      });
+    }
 
     console.log("✅ Successfully reloaded all commands.");
   } catch (error) {
