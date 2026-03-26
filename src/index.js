@@ -123,8 +123,59 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
-  // 124
-  // 125
+  // Handle Uwuify Remove Select Menu
+  if (interaction.isStringSelectMenu()) {
+    if (interaction.customId === "remove_uwu_select") {
+      const UwuUser = require("./database/UwuUser");
+
+      if (
+        !interaction.member.permissions.has(PermissionFlagsBits.ManageRoles)
+      ) {
+        return interaction.reply({
+          content: "You don't have permission to do this.",
+          flags: 64,
+        }); // 64 = Ephemeral
+      }
+
+      const values = interaction.values;
+
+      if (values.includes("cancel")) {
+        return interaction.update({
+          content: "❌ Canceled.",
+          embeds: [],
+          components: [],
+        });
+      }
+
+      const isSelfUwuified = await UwuUser.exists({ userId: interaction.user.id });
+      const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator);
+
+      if (values.includes("all")) {
+        if (isSelfUwuified && !isAdmin) {
+           return interaction.update({ content: "Nice try! You cannot use 'Select all' to remove yourself from the list! ❌", embeds: [], components: [] });
+        }
+        await UwuUser.deleteMany({});
+        return interaction.update({
+          content: "✅ Removed **ALL** users from the uwuify list!",
+          embeds: [],
+          components: [],
+        });
+      }
+
+      if (values.includes(interaction.user.id) && !isAdmin) {
+        return interaction.update({ content: "Nice try! You cannot remove yourself from the uwuify list! ❌", embeds: [], components: [] });
+      }
+
+      // Otherwise, remove specifically selected user IDs
+      await UwuUser.deleteMany({ userId: { $in: values } });
+      return interaction.update({
+        content: `✅ Removed ${values.length} user(s) from the uwuify list!`,
+        embeds: [],
+        components: [],
+      });
+    }
+  }
+
   // Handle Chat Input Commands (Slash Commands)
   if (!interaction.isChatInputCommand()) return;
 
@@ -269,6 +320,74 @@ client.on("messageCreate", async (message) => {
 
   // Sticky Note Logic
   stickyManager.handleMessage(message);
+
+  // Uwuify Interceptor Logic
+  try {
+    const UwuUser = require("./database/UwuUser");
+    const isUwu = await UwuUser.findOne({ userId: message.author.id });
+
+    if (isUwu && message.content.trim().length > 0) {
+      const { uwuifyText } = require("./utils/uwuifier");
+
+      let uwuText = message.content;
+      try {
+        uwuText = uwuifyText(message.content, {
+          faces: 0.08, // emoticons
+          actions: 0.05, // *boops*
+          stutters: 0.1,
+        });
+      } catch (err) {
+        // Fallback for simple content if utility fails
+        uwuText = message.content
+          .replace(/(?:r|l)/g, "w")
+          .replace(/(?:R|L)/g, "W");
+      }
+
+      const webhooks = await message.channel
+        .fetchWebhooks()
+        .catch(() => new Map());
+      let webhook = webhooks.find(
+        (wh) => wh.token && wh.owner.id === message.client.user.id,
+      );
+
+      if (
+        !webhook &&
+        message.channel
+          .permissionsFor(message.client.user)
+          .has(PermissionFlagsBits.ManageWebhooks)
+      ) {
+        webhook = await message.channel
+          .createWebhook({
+            name: "Aqua Bot Webhook Transporter",
+            avatar: message.client.user.displayAvatarURL(),
+          })
+          .catch(console.error);
+      }
+
+      if (webhook) {
+        await webhook.send({
+          content: uwuText,
+          username:
+            message.member?.nickname ||
+            message.author.displayName ||
+            message.author.username,
+          avatarURL:
+            message.member?.displayAvatarURL({
+              extension: "png",
+              forceStatic: true,
+            }) ||
+            message.author.displayAvatarURL({
+              extension: "png",
+              forceStatic: true,
+            }),
+        });
+        await message.delete().catch(() => {});
+        return; // Prevent command execution or further processing
+      }
+    }
+  } catch (err) {
+    console.error("Uwu interceptor error:", err);
+  }
 
   // --- Start Prefix Command Handling ---
   if (message.content.startsWith(prefix)) {

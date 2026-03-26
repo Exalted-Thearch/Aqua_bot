@@ -112,11 +112,11 @@ const rest = new REST().setToken(token);
       });
     }
 
-    // --- D. Register to TEST SERVER (Everything) ---
-    // We combine the arrays here using spread syntax and deduplicate by name
+    // --- D. Register to TEST SERVER (Only Guild-Specific ones) ---
+    // Global commands shouldn't be registered to the guild again or they duplicate.
     const allTestCommands = [
       ...new Map(
-        [...nexusCommands, ...generalCommands, ...globalCommands].map((c) => [
+        [...nexusCommands, ...generalCommands].map((c) => [
           c.name,
           c,
         ]),
