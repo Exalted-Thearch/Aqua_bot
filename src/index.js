@@ -141,7 +141,7 @@ client.on("interactionCreate", async (interaction) => {
 
       if (values.includes("cancel")) {
         return interaction.update({
-          content: "❌ Canceled.",
+          content: "<:close:1435556235691954216> Canceled.",
           embeds: [],
           components: [],
         });
@@ -152,24 +152,24 @@ client.on("interactionCreate", async (interaction) => {
 
       if (values.includes("all")) {
         if (isSelfUwuified && !isAdmin) {
-           return interaction.update({ content: "Nice try! You cannot use 'Select all' to remove yourself from the list! ❌", embeds: [], components: [] });
+           return interaction.update({ content: "<a:crossmark:1461047109536055594> Nice try! You cannot use 'Select all' to remove yourself from the uwuify list!", embeds: [], components: [] });
         }
         await UwuUser.deleteMany({});
         return interaction.update({
-          content: "✅ Removed **ALL** users from the uwuify list!",
+          content: "<a:checkmark:1461047015050973245> Removed **ALL** users from the uwuify list!",
           embeds: [],
           components: [],
         });
       }
 
       if (values.includes(interaction.user.id) && !isAdmin) {
-        return interaction.update({ content: "Nice try! You cannot remove yourself from the uwuify list! ❌", embeds: [], components: [] });
+        return interaction.update({ content: "<a:crossmark:1461047109536055594> Nice try! You cannot remove yourself from the uwuify list!", embeds: [], components: [] });
       }
 
       // Otherwise, remove specifically selected user IDs
       await UwuUser.deleteMany({ userId: { $in: values } });
       return interaction.update({
-        content: `✅ Removed ${values.length} user(s) from the uwuify list!`,
+        content: `<a:checkmark:1461047015050973245> Removed ${values.length} user(s) from the uwuify list!`,
         embeds: [],
         components: [],
       });

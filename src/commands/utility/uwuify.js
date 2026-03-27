@@ -5,7 +5,7 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName("uwuify")
     .setDescription("Force a user's messages to be uwuified automatically! <3")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addUserOption((option) =>
       option.setName("user")
         .setDescription("The user to uwuify")
