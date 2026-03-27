@@ -79,6 +79,10 @@ client.on("ready", async (c) => {
   console.log("✅ MongoDB initialized and ready.");
   await stickyManager.init();
 
+  const { initLibrarySync } = require("./utils/librarySync");
+  initLibrarySync(client);
+  console.log("✅ Auto Library Sync initialized.");
+
   setInterval(async () => {
     try {
       const status = [
