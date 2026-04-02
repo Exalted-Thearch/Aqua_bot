@@ -24,8 +24,18 @@ module.exports = {
           option
             .setName("message")
             .setDescription(
-              "The message content (leave empty to use a popup for multi-line)",
+              "The message content (skip this to use a popup for multi-line)",
             )
+            .setRequired(false),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("delay")
+            .setDescription(
+              "Delay in seconds after last message before resending the stickynote (default: 30)",
+            )
+            .setMinValue(5)
+            .setMaxValue(3600)
             .setRequired(false),
         )
         .addChannelOption((option) =>
@@ -45,8 +55,18 @@ module.exports = {
           option
             .setName("message")
             .setDescription(
-              "The new message content (leave empty to use a popup for multi-line)",
+              "The new message content (skip this to use a popup for multi-line)",
             )
+            .setRequired(false),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("delay")
+            .setDescription(
+              "Delay in seconds after last message before resending the stickynote",
+            )
+            .setMinValue(5)
+            .setMaxValue(3600)
             .setRequired(false),
         )
         .addChannelOption((option) =>
@@ -92,6 +112,9 @@ module.exports = {
     const channel =
       interaction.options.getChannel("channel") || interaction.channel;
     const messageContent = interaction.options.getString("message");
+    const delay = interaction.options.getInteger("delay") ?? interaction.options.getInteger("time");
+    console.log(`[StickyNote Debug] Raw options:`, JSON.stringify(interaction.options.data));
+    console.log(`[StickyNote Debug] delay=${delay}`);
 
     try {
       if (subcommand === "create" || subcommand === "edit") {
@@ -120,7 +143,7 @@ module.exports = {
           const messageInput = new TextInputBuilder()
             .setCustomId("messageInput")
             .setLabel("Message Content")
-            .setStyle(TextInputStyle.Paragraph) // Allows multi-line
+            .setStyle(TextInputStyle.Paragraph)
             .setRequired(true)
             .setPlaceholder("Enter your sticky note message here...");
 
@@ -128,10 +151,17 @@ module.exports = {
             messageInput.setValue(existing.message);
           }
 
-          const firstActionRow = new ActionRowBuilder().addComponents(
-            messageInput,
-          );
-          modal.addComponents(firstActionRow);
+          const delayInput = new TextInputBuilder()
+            .setCustomId("delayInput")
+            .setLabel("Delay (seconds) — min 5, max 3600, default 30")
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+            .setPlaceholder("30")
+            .setValue(String(delay ?? existing?.delay ?? 30));
+
+          const firstActionRow = new ActionRowBuilder().addComponents(messageInput);
+          const secondActionRow = new ActionRowBuilder().addComponents(delayInput);
+          modal.addComponents(firstActionRow, secondActionRow);
 
           await interaction.showModal(modal);
           return;
@@ -143,6 +173,7 @@ module.exports = {
           channel.id,
           messageContent,
           interaction.client,
+          delay,
         );
 
         if (!success) {
@@ -151,8 +182,9 @@ module.exports = {
           });
         }
 
+        const delayText = delay ? ` (delay: ${delay}s)` : '';
         return interaction.editReply({
-          content: `✅ Sticky note ${isEdit ? "updated" : "created"} in ${channel}!`,
+          content: `✅ Sticky note ${isEdit ? "updated" : "created"} in ${channel}!${delayText}`,
         });
       }
 
@@ -183,7 +215,7 @@ module.exports = {
         for (const sticky of allStickies) {
           const ch = interaction.guild.channels.cache.get(sticky.channelId);
           if (ch) {
-            guildStickies.push({ channel: ch, message: sticky.message });
+            guildStickies.push({ channel: ch, message: sticky.message, delay: sticky.delay || 30 });
           }
         }
 
@@ -200,7 +232,7 @@ module.exports = {
         const description = guildStickies
           .map(
             (s, i) =>
-              `**${i + 1}.** ${s.channel}\n> ${s.message.substring(0, 100)}${s.message.length > 100 ? "..." : ""}`,
+              `**${i + 1}.** ${s.channel} ⏱️ ${s.delay}s\n> ${s.message.substring(0, 100)}${s.message.length > 100 ? "..." : ""}`,
           )
           .join("\n\n");
 
@@ -224,25 +256,42 @@ module.exports = {
   },
 
   async handleModal(interaction) {
+    // CustomId: stickynote:create|edit:channelId
+    const parts = interaction.customId.split(":");
+    const mode = parts[1];
+    const channelId = parts[2];
+
+    const messageContent =
+      interaction.fields.getTextInputValue("messageInput");
+
+    // Parse delay from modal input
+    const delayRaw = interaction.fields.getTextInputValue("delayInput");
+    let parsedDelay = delayRaw ? parseInt(delayRaw, 10) : null;
+    if (parsedDelay !== null && (isNaN(parsedDelay) || parsedDelay < 5 || parsedDelay > 3600)) {
+      parsedDelay = null; // Invalid input, use existing/default
+    }
+    console.log(`[StickyNote Modal] mode=${mode}, channelId=${channelId}, delay=${parsedDelay}`);
+
+    const channel = interaction.guild.channels.cache.get(channelId);
+
+    // Defer FIRST (must respond within 3 seconds)
     try {
-      // CustomId: stickynote:create|edit:channelId
-      const parts = interaction.customId.split(":");
-      const mode = parts[1];
-      const channelId = parts[2];
-      const messageContent =
-        interaction.fields.getTextInputValue("messageInput");
-
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    } catch (err) {
+      console.error("[StickyNote Modal] Failed to defer:", err.message);
+      return; // Can't respond, bail out
+    }
 
-      const channel = interaction.guild.channels.cache.get(channelId);
-      if (!channel) {
-        return interaction.editReply("❌ Channel not found.");
-      }
+    if (!channel) {
+      return interaction.editReply("❌ Channel not found.");
+    }
 
+    try {
       const success = await stickyManager.addSticky(
         channelId,
         messageContent,
         interaction.client,
+        parsedDelay,
       );
 
       if (!success) {
@@ -251,12 +300,13 @@ module.exports = {
         });
       }
 
+      const delayText = parsedDelay ? ` (delay: ${parsedDelay}s)` : '';
       return interaction.editReply({
-        content: `✅ Sticky note ${mode === "edit" ? "updated" : "created"} in ${channel}!`,
+        content: `✅ Sticky note ${mode === "edit" ? "updated" : "created"} in ${channel}!${delayText}`,
       });
     } catch (error) {
-      console.error("Error handling sticky modal:", error);
-      await interaction.editReply("❌ An error occurred processing the modal.");
+      console.error("[StickyNote Modal] Error:", error);
+      await interaction.editReply("❌ An error occurred processing the modal.").catch(() => {});
     }
   },
 };

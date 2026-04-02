@@ -14,6 +14,10 @@ const stickyNoteSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
+  delay: {
+    type: Number,
+    default: 30, // seconds
+  },
   createdAt: {
     type: Date,
     default: Date.now,

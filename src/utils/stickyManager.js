@@ -5,6 +5,7 @@ class StickyManager {
   constructor() {
     this.cache = new Set(); // Stores channel IDs with active stickies
     this.timers = new Map(); // Stores timeout IDs: channelId -> timeout
+    this.delays = new Map(); // Stores delay in ms: channelId -> delay
   }
 
   /**
@@ -12,9 +13,10 @@ class StickyManager {
    */
   async init() {
     try {
-      const stickies = await StickyNote.find({}, { channelId: 1 });
+      const stickies = await StickyNote.find({}, { channelId: 1, delay: 1 });
       for (const note of stickies) {
         this.cache.add(note.channelId);
+        this.delays.set(note.channelId, (note.delay || 30) * 1000);
       }
       console.log(
         `[StickyManager] Loaded ${this.cache.size} sticky channels into cache.`,
@@ -42,11 +44,12 @@ class StickyManager {
       this.timers.delete(channelId);
     }
 
-    // Set new timer for 30 seconds
+    // Set new timer using per-channel delay (default 30s)
+    const delayMs = this.delays.get(channelId) || 30000;
     const timer = setTimeout(() => {
       this.resendSticky(message.channel);
       this.timers.delete(channelId);
-    }, 30000);
+    }, delayMs);
 
     this.timers.set(channelId, timer);
   }
@@ -118,9 +121,16 @@ class StickyManager {
    * @param {string} channelId
    * @param {string} message
    * @param {Client} client
+   * @param {number} [delay] - Delay in seconds before resending (default: 30)
    * @returns {Promise<boolean>} Success
    */
-  async addSticky(channelId, message, client) {
+  async addSticky(channelId, message, client, delay) {
+    // Clear any pending timer IMMEDIATELY (before any async ops to prevent race condition)
+    if (this.timers.has(channelId)) {
+      clearTimeout(this.timers.get(channelId));
+      this.timers.delete(channelId);
+    }
+
     // Upsert the sticky note
     let note = await StickyNote.findOne({ channelId });
 
@@ -130,20 +140,21 @@ class StickyManager {
       note.message = message;
     }
 
+    // Update delay if provided
+    if (delay !== undefined && delay !== null) {
+      note.delay = delay;
+    }
+
     // Save initial state to DB
     await note.save();
 
     // Add to cache
     this.cache.add(channelId);
+    this.delays.set(channelId, (note.delay || 30) * 1000);
 
     // Trigger immediate send logic (or just send directly and set ID)
     const channel = client.channels.cache.get(channelId);
     if (channel) {
-      // Clear any pending timer
-      if (this.timers.has(channelId)) {
-        clearTimeout(this.timers.get(channelId));
-        this.timers.delete(channelId);
-      }
       // Force immediate resend which handles deletion of old message if it exists in DB
       return await this.resendSticky(channel);
     }
@@ -168,6 +179,7 @@ class StickyManager {
     }
 
     this.cache.delete(channelId);
+    this.delays.delete(channelId);
 
     if (this.timers.has(channelId)) {
       clearTimeout(this.timers.get(channelId));
