@@ -320,10 +320,10 @@ async function checkExpiredRoles() {
 }
 setInterval(checkExpiredRoles, 12 * 60 * 60 * 1000);
 client.on("messageCreate", async (message) => {
-  if (message.author.bot) return;
-
-  // Sticky Note Logic
+  // Sticky Note Logic — runs for all messages (including other bots)
   stickyManager.handleMessage(message);
+
+  if (message.author.bot) return;
 
   // Uwuify Interceptor Logic
   try {

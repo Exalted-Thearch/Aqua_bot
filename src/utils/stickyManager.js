@@ -31,7 +31,7 @@ class StickyManager {
    * @param {Message} message
    */
   async handleMessage(message) {
-    if (!message.guild || message.author.bot) return;
+    if (!message.guild || message.author.id === message.client.user.id) return;
 
     // Quick check against cache to avoid DB calls
     if (!this.cache.has(message.channel.id)) return;
