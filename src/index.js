@@ -3,6 +3,7 @@ const stringSimilarity = require("string-similarity");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const connectMongo = require("./database/mongo");
 const UserRole = require("./database/UserRole");
+const MutedUser = require("./database/MutedUser");
 const { logInfo, logError } = require("./utils/logger");
 const stickyManager = require("./utils/stickyManager");
 const {
@@ -32,7 +33,9 @@ const cooldowns = new Map();
 // MongoDB handled by connectMongo
 
 client.commands = new Collection();
-const prefix = "!";
+const ServerConfig = require("./database/ServerConfig");
+const prefixCache = new Map();
+
 const { fetchAllForumPosts, clearForumCache } = require("./utils/forumUtils");
 
 const commandsPath = path.join(__dirname, "commands");
@@ -115,6 +118,10 @@ client.on("ready", async (c) => {
   }, 60000);
 });
 
+client.on("prefixChange", (guildId, newPrefix) => {
+  prefixCache.set(guildId, newPrefix);
+});
+
 client.on("interactionCreate", async (interaction) => {
   // Handle Modals
   if (interaction.isModalSubmit()) {
@@ -151,23 +158,38 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      const isSelfUwuified = await UwuUser.exists({ userId: interaction.user.id });
-      const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator);
+      const isSelfUwuified = await UwuUser.exists({
+        userId: interaction.user.id,
+      });
+      const isAdmin = interaction.member.permissions.has(
+        PermissionFlagsBits.Administrator,
+      );
 
       if (values.includes("all")) {
         if (isSelfUwuified && !isAdmin) {
-           return interaction.update({ content: "<a:crossmark:1461047109536055594> Nice try! You cannot use 'Select all' to remove yourself from the uwuify list!", embeds: [], components: [] });
+          return interaction.update({
+            content:
+              "<a:crossmark:1461047109536055594> Nice try! You cannot use 'Select all' to remove yourself from the uwuify list!",
+            embeds: [],
+            components: [],
+          });
         }
         await UwuUser.deleteMany({});
         return interaction.update({
-          content: "<a:checkmark:1461047015050973245> Removed **ALL** users from the uwuify list!",
+          content:
+            "<a:checkmark:1461047015050973245> Removed **ALL** users from the uwuify list!",
           embeds: [],
           components: [],
         });
       }
 
       if (values.includes(interaction.user.id) && !isAdmin) {
-        return interaction.update({ content: "<a:crossmark:1461047109536055594> Nice try! You cannot remove yourself from the uwuify list!", embeds: [], components: [] });
+        return interaction.update({
+          content:
+            "<a:crossmark:1461047109536055594> Nice try! You cannot remove yourself from the uwuify list!",
+          embeds: [],
+          components: [],
+        });
       }
 
       // Otherwise, remove specifically selected user IDs
@@ -319,6 +341,62 @@ async function checkExpiredRoles() {
   }
 }
 setInterval(checkExpiredRoles, 12 * 60 * 60 * 1000);
+
+// --- MUTE EXPIRY SWEEP ---
+async function checkExpiredMutes() {
+  try {
+    const now = Date.now();
+    const expired = await MutedUser.find({
+      expiresAt: { $ne: null, $lte: now },
+    });
+
+    if (!expired.length) return;
+
+    for (const record of expired) {
+      try {
+        const guild = client.guilds.cache.get(record.guildId);
+        if (!guild) {
+          await MutedUser.deleteOne({ _id: record._id });
+          continue;
+        }
+
+        const member = await guild.members
+          .fetch(record.userId)
+          .catch(() => null);
+        if (!member) {
+          await MutedUser.deleteOne({ _id: record._id });
+          continue;
+        }
+
+        const { executeUnmute } = require("./commands/roles/mute");
+        const result = await executeUnmute({
+          guild,
+          target: member,
+          moderator: client.user,
+          client,
+          reason: "Mute duration expired",
+        });
+
+        if (result.success) {
+          console.log(
+            `[MuteExpiry] Auto-unmuted ${member.user.tag} in ${guild.name}`,
+          );
+        }
+      } catch (innerErr) {
+        console.error(
+          `[MuteExpiry] Error processing record for ${record.userId}:`,
+          innerErr,
+        );
+        await MutedUser.deleteOne({ _id: record._id }).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.error("[MuteExpiry] Sweep error:", err);
+  }
+}
+// Run every 10 seconds for timely unmutes
+checkExpiredMutes();
+setInterval(checkExpiredMutes, 10 * 1000);
 client.on("messageCreate", async (message) => {
   // Sticky Note Logic — runs for all messages (including other bots)
   stickyManager.handleMessage(message);
@@ -394,9 +472,41 @@ client.on("messageCreate", async (message) => {
   }
 
   // --- Start Prefix Command Handling ---
+  if (!message.guild) return;
+
+  let prefix = prefixCache.get(message.guild.id);
+  if (!prefix) {
+    const config = await ServerConfig.findOne({ guildId: message.guild.id });
+    prefix = config?.prefix || "!";
+    prefixCache.set(message.guild.id, prefix);
+  }
+
   if (message.content.startsWith(prefix)) {
     const args = message.content.slice(prefix.length).trim().split(/ +/);
     const commandName = args.shift().toLowerCase();
+
+    // --- PREFIX COMMAND ---
+    if (commandName === "prefix") {
+      const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
+      if (!member?.permissions.has(PermissionFlagsBits.Administrator)) {
+        return message.channel.send("<:alert:1435556816267247738> You need Administrator permission to change the prefix.");
+      }
+
+      const newPrefix = args[0];
+      if (!newPrefix) {
+        return message.channel.send(`<:alert:1435556816267247738> Usage: \`${prefix}prefix <new_prefix>\``);
+      }
+
+      const { executePrefixChange } = require("./commands/utility/prefix");
+      const result = await executePrefixChange(message.guild.id, newPrefix, message.author, client);
+
+      if (!result.success) {
+        return message.channel.send(result.error);
+      }
+
+      prefixCache.set(message.guild.id, newPrefix);
+      return message.channel.send({ embeds: [result.embed] });
+    }
 
     // --- SEARCH COMMAND ---
     if (commandName === "search" || commandName === "find") {
@@ -555,6 +665,175 @@ client.on("messageCreate", async (message) => {
       return msg.edit(
         `<a:correct:1459492234834739368> Cache refreshed! Found ${posts.length} forum posts.`,
       );
+
+      // ── !mute <user|userId> [duration] [reason...] ─────────────────
+    } else if (commandName === "mute") {
+      if (!message.guild) return;
+
+      // Permission check
+      const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
+      if (!member?.permissions.has(PermissionFlagsBits.ModerateMembers)) {
+        return message.channel.send(
+          "<:alert:1435556816267247738> You don't have permission to mute members.",
+        );
+      }
+
+      let targetId = null;
+
+      if (args.length > 0) {
+        const firstArgMatch = args[0].replace(/[<@!>]/g, "");
+        if (/^\d{17,20}$/.test(firstArgMatch)) {
+          targetId = firstArgMatch;
+          args.shift(); // consume the target argument
+        }
+      }
+
+      if (!targetId && message.reference?.messageId) {
+        try {
+          const repliedMsg = await message.channel.messages.fetch(message.reference.messageId);
+          targetId = repliedMsg.author.id;
+        } catch (err) {
+          console.error("Could not fetch replied message:", err);
+        }
+      }
+
+      if (!targetId) {
+        return message.channel.send(
+          `<:alert:1435556816267247738> Usage: \`${prefix}mute <@user|userId> [duration] [reason]\` or reply to a user's message.`,
+        );
+      }
+
+      const { parseDuration, executeMute } = require("./commands/roles/mute");
+      const targetMember = await message.guild.members
+        .fetch(targetId)
+        .catch(() => null);
+
+      if (!targetMember) {
+        return message.channel.send(
+          `<a:crossmark:1461047109536055594> Could not find member \`${targetId}\` in this server.`,
+        );
+      }
+
+      if (targetMember.id === message.author.id) {
+        return message.channel.send(
+          "<a:crossmark:1461047109536055594> You cannot mute yourself.",
+        );
+      }
+
+      if (
+        targetMember.roles.highest.position >=
+        member.roles.highest.position
+      ) {
+        return message.channel.send(
+          "<a:crossmark:1461047109536055594> You cannot mute someone with an equal or higher role.",
+        );
+      }
+
+      // Optional duration (next arg)
+      let durationMs = null;
+      if (args.length > 0) {
+        const parsed = parseDuration(args[0]);
+        if (parsed !== null) {
+          durationMs = parsed.ms;
+          args.shift(); // consume the duration token
+        }
+      }
+
+      const reason = args.join(" ") || "No reason provided";
+
+      await message.react("1448687462800035840").catch(() => {});
+
+      const result = await executeMute({
+        guild: message.guild,
+        target: targetMember,
+        moderator: message.author,
+        client: message.client,
+        durationMs,
+        reason,
+      });
+
+      await message.reactions.resolve("1448687462800035840")?.users.remove(message.client.user.id).catch(() => {});
+
+      if (!result.success) {
+        return message.channel.send(result.error);
+      }
+      return message.channel.send({
+        content: null,
+        components: [result.embed],
+        flags: MessageFlags.IsComponentsV2,
+        allowedMentions: { parse: [] },
+      });
+
+      // ── !unmute <user|userId> [reason...] ──────────────────────────
+    } else if (commandName === "unmute") {
+      if (!message.guild) return;
+
+      const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
+      if (!member?.permissions.has(PermissionFlagsBits.ModerateMembers)) {
+        return message.channel.send(
+          "<:alert:1435556816267247738> You don't have permission to unmute members.",
+        );
+      }
+
+      let targetId = null;
+
+      if (args.length > 0) {
+        const firstArgMatch = args[0].replace(/[<@!>]/g, "");
+        if (/^\d{17,20}$/.test(firstArgMatch)) {
+          targetId = firstArgMatch;
+          args.shift();
+        }
+      }
+
+      if (!targetId && message.reference?.messageId) {
+        try {
+          const repliedMsg = await message.channel.messages.fetch(message.reference.messageId);
+          targetId = repliedMsg.author.id;
+        } catch (err) {
+          console.error("Could not fetch replied message:", err);
+        }
+      }
+
+      if (!targetId) {
+        return message.channel.send(
+          `<:alert:1435556816267247738> Usage: \`${prefix}unmute <@user|userId> [reason]\` or reply to a user's message.`,
+        );
+      }
+
+      const { executeUnmute } = require("./commands/roles/mute");
+      const targetMember = await message.guild.members
+        .fetch(targetId)
+        .catch(() => null);
+
+      if (!targetMember) {
+        return message.channel.send(
+          `<a:crossmark:1461047109536055594> Could not find member \`${targetId}\` in this server.`,
+        );
+      }
+
+      const reason = args.join(" ") || "No reason provided";
+
+      await message.react("1448687462800035840").catch(() => {});
+
+      const result = await executeUnmute({
+        guild: message.guild,
+        target: targetMember,
+        moderator: message.author,
+        client: message.client,
+        reason,
+      });
+
+      await message.reactions.resolve("1448687462800035840")?.users.remove(message.client.user.id).catch(() => {});
+
+      if (!result.success) {
+        return message.channel.send(result.error);
+      }
+      return message.channel.send({
+        content: null,
+        components: [result.embed],
+        flags: MessageFlags.IsComponentsV2,
+        allowedMentions: { parse: [] },
+      });
     }
   }
 });

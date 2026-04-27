@@ -45,7 +45,12 @@ if (fs.existsSync(commandsPath)) {
           const commandData = command.data.toJSON();
 
           if (folder === "roles") {
-            nexusCommands.push(commandData);
+            // Make moderation commands global
+            if (["mute.js", "unmute.js", "set_muterole.js"].includes(file)) {
+              globalCommands.push(commandData);
+            } else {
+              nexusCommands.push(commandData);
+            }
           } else if (folder === "utility") {
             if (file === "searchTag.js") {
               generalCommands.push(commandData); // Grimoire only

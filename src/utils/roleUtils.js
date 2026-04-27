@@ -86,13 +86,15 @@ async function updateRoleColors(
 }
 
 function parseDuration(input) {
-  const match = input.match(/^(\d+)\s*(m|min|h|d|w|mon|y)$/i);
+  const match = input.match(/^(\d+)\s*(s|sec|m|min|h|d|w|mon|y)$/i);
   if (!match) return null;
 
   const value = parseInt(match[1], 10);
   const unit = match[2].toLowerCase();
 
   const units = {
+    s: { ms: 1000, label: "second" },
+    sec: { ms: 1000, label: "second" },
     m: { ms: 60 * 1000, label: "minute" },
     min: { ms: 60 * 1000, label: "minute" },
     h: { ms: 60 * 60 * 1000, label: "hour" },
